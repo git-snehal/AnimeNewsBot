@@ -1,10 +1,10 @@
 <div align="center">
 
-# ⚡ Autonomous Anime News & Trailer Bot
+#  Automated Anime News Bot
 
 <img src="https://github.com/git-snehal/git-snehal/blob/main/assets/News.gif" width="100%" alt="Anime News Bot Demo" />
 
-### *A lightning-fast, production-ready autonomous Telegram bot that aggregates, translates, formats, and broadcasts anime news and YouTube video trailers in real-time.*
+### *A lightning-fast, production-ready autonomous Telegram bot that aggregates, translates, formats, and broadcasts anime news, manga news, anime games news and YouTube video trailers in real-time.*
 
 </div>
 
