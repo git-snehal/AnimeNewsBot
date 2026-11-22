@@ -1,0 +1,7 @@
+.env
+cookies.txt
+*.session
+*.session-journal
+database/*.db*
+downloads/
+__pycache__/
