@@ -1,39 +1,163 @@
 import asyncio
+import logging
 import os
+import shutil
+from contextlib import suppress
+from datetime import datetime, timedelta, timezone
+
 from pyrogram import Client, filters, idle
+from pyrogram.enums import ParseMode
+
+from config import (
+    ADMIN_IDS, API_HASH, API_ID, BOT_TOKEN, COOKIES_PATH, DAILY_STATS, DOWNLOAD_TRAILERS,
+    PAGE_VIDEO_FALLBACK, POLL_INTERVAL, TIMEZONE, TZ,
+)
 from database.db import Database
+from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
-from config import API_ID, API_HASH, BOT_TOKEN
+from helper.state import state
+from helper.stats import daily_stats_loop, day_report, week_report
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("bot")
 
 app = Client("anime_news_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 db = Database()
+admin_only = filters.user(ADMIN_IDS)
+
+
+def _is_admin(message) -> bool:
+    return bool(message.from_user and message.from_user.id in ADMIN_IDS)
+
+
+def _ago(dt) -> str:
+    if not dt:
+        return "never"
+    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60} min ago"
+    return f"{secs // 3600}h {(secs % 3600) // 60}m ago"
+
+
+# ------------------------------------------------------------------ everyone
+@app.on_message(filters.private & filters.command("start"))
+async def start_cmd(client, message):
+    if _is_admin(message):
+        await set_admin_menu(client, message.chat.id)  # makes sure this admin's "/" menu is up to date
+        await message.reply_text("❖ Anime News Bot — admin menu is ready. Type / to see the commands.\n\n" + help_text(True))
+    else:
+        await message.reply_text("❖ Anime News Bot posts the latest anime news to the channel.")
+
+
+@app.on_message(filters.command("help"))
+async def help_cmd(client, message):
+    await message.reply_text(help_text(_is_admin(message)))
+
 
 @app.on_message(filters.command("ping"))
 async def ping_cmd(client, message):
-    await message.reply_text("❖ **Anime News Bot is active and running!**")
+    await message.reply_text("❖ Anime News Bot is active and running!")
 
-@app.on_message(filters.private & filters.command("setcookies"))
-async def set_cookies_cmd(client, message):
-    if not message.reply_to_message or not message.reply_to_message.document:
-        await message.reply_text("❖ Please reply to an uploaded `cookies.txt` document file with `/setcookies`!")
+
+# ------------------------------------------------------------------ admins
+@app.on_message(admin_only & filters.command("stats"))
+async def stats_cmd(client, message):
+    arg = (message.command[1].lower() if len(message.command) > 1 else "today")
+    today = datetime.now(TZ).date()
+    if arg in ("week", "7", "7d"):
+        text = week_report(db, today)
+    elif arg in ("yesterday", "y"):
+        d = today - timedelta(days=1)
+        text = day_report(db, d, title=f"Yesterday — {d.strftime('%d %b %Y')}")
+    else:
+        text = day_report(db, today, title=f"Today so far — {today.strftime('%d %b %Y')}")
+    await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & filters.command("status"))
+async def status_cmd(client, message):
+    up = datetime.now(timezone.utc) - state.started_at
+    lines = [
+        "⏸ <b>Paused</b>" if state.paused else "🟢 <b>Running</b>",
+        f"Uptime: {up.days}d {up.seconds // 3600}h {(up.seconds % 3600) // 60}m",
+        f"Last check: {_ago(state.last_cycle_at)} ({state.last_cycle_found} new found)",
+        f"Checks every {POLL_INTERVAL // 60} min · timezone {TIMEZONE}",
+        "",
+        "<b>Feeds</b>",
+    ]
+    for name, f in state.feeds.items():
+        lines.append(f"   {'✅' if f['ok'] else '❌'} {name} — " + (f"{f['entries']} entries" if f["ok"] else f["error"] or "failed"))
+    if not state.feeds:
+        lines.append("   (not checked yet)")
+    lines += [
+        "",
+        f"Cookies: {'✅ present' if os.path.exists(COOKIES_PATH) else '❌ none (set with /setcookies)'}",
+        f"Trailer downloads: {'on' if DOWNLOAD_TRAILERS else 'off'} · page lookup: {'on' if PAGE_VIDEO_FALLBACK else 'off'}",
+        f"Daily report: {'on' if DAILY_STATS else 'off'}",
+        f"Posted all-time: {db.total_posted()}",
+    ]
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & filters.command("fetchnow"))
+async def fetchnow_cmd(client, message):
+    if state.paused:
+        await message.reply_text("⏸ Posting is paused. Use /resume first.")
         return
+    state.wake.set()
+    await message.reply_text("🔄 Checking the feeds now. New posts will appear in the channel shortly.")
 
-    await message.reply_text("❖ Downloading and configuring cookies file...")
+
+@app.on_message(admin_only & filters.command("pause"))
+async def pause_cmd(client, message):
+    state.paused = True
+    await message.reply_text("⏸ Posting paused. Nothing is skipped: new articles are posted after /resume.")
+
+
+@app.on_message(admin_only & filters.command("resume"))
+async def resume_cmd(client, message):
+    state.paused = False
+    state.wake.set()
+    await message.reply_text("▶️ Posting resumed. Checking the feeds now.")
+
+
+@app.on_message(admin_only & filters.private & filters.command("setcookies"))
+async def set_cookies_cmd(client, message):
+    doc = message.reply_to_message.document if message.reply_to_message else None
+    if not doc:
+        await message.reply_text("❖ Reply to an uploaded `cookies.txt` file with /setcookies.")
+        return
+    if doc.file_size and doc.file_size > 2 * 1024 * 1024:
+        await message.reply_text("❌ That file is too large for a cookies file.")
+        return
     try:
-        await client.download_media(
-            message.reply_to_message,
-            file_name="cookies.txt"
-        )
-        await message.reply_text("✅ `cookies.txt` successfully saved and loaded! yt-dlp is now authenticated.")
+        tmp = await client.download_media(message.reply_to_message, file_name="downloads/cookies_upload.txt")
+        shutil.move(tmp, COOKIES_PATH)
+        await message.reply_text(f"✅ Cookies saved to `{os.path.abspath(COOKIES_PATH)}`. yt-dlp will use them from now on.")
     except Exception as e:
-        await message.reply_text(f"❌ Failed to save cookies file: {e}")
+        await message.reply_text(f"❌ Failed to save cookies: {e}")
+
 
 async def main():
     await app.start()
-    print("Bot logged in successfully! Starting news scheduler...")
-    asyncio.create_task(broadcast_news_loop(app, db))
-    await idle()
-    await app.stop()
+    await register_commands(app)
+    log.info("Bot started. Admins: %s", ADMIN_IDS)
+    tasks = [
+        asyncio.create_task(broadcast_news_loop(app, db)),
+        asyncio.create_task(daily_stats_loop(app, db)),
+    ]
+    try:
+        await idle()
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            with suppress(asyncio.CancelledError):
+                await t
+        await app.stop()
+
 
 if __name__ == "__main__":
     app.run(main())

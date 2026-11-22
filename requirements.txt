@@ -1,0 +1,9 @@
+pyrofork>=2.3.60
+tgcrypto
+feedparser
+httpx
+yt-dlp[default]
+deep-translator
+python-dotenv
+beautifulsoup4
+tzdata
