@@ -10,6 +10,7 @@ class BotState:
         self.started_at = datetime.now(timezone.utc)
         self.last_cycle_at = None
         self.last_cycle_found = 0
+        self.feed_pref = {}  # name -> (url, header profile index) that worked last time
         self.feeds = {}  # name -> {"ok": bool, "entries": int, "error": str, "at": datetime}
 
 

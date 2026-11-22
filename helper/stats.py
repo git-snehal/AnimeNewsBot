@@ -31,6 +31,8 @@ def day_report(db, d: date, title: str = None, all_time: bool = True) -> str:
         lines.append(f"   🗞 Other news: {s['posted'] - s['media']}")
         lines += ["", "<b>By source</b>"]
         lines += [f"   • {_esc(src)} — {n}" for src, n in s["by_source"]]
+    if s["duplicates"]:
+        lines += ["", f"♻️ Duplicates skipped (same story from another outlet): {s['duplicates']}"]
     if s["skipped"]:
         lines += ["", f"⚠️ Skipped after repeated errors: {s['skipped']}"]
     if all_time:

@@ -52,14 +52,21 @@ MAX_VIDEO_MB = int(_env("MAX_VIDEO_MB", "150"))
 MAX_VIDEO_SECONDS = int(_env("MAX_VIDEO_SECONDS", "600"))
 MAX_VIDEO_HEIGHT = int(_env("MAX_VIDEO_HEIGHT", "720"))
 COOKIES_PATH = _env("COOKIES_PATH", "cookies.txt")
+# Lets yt-dlp download its official YouTube challenge-solver script from GitHub when the yt-dlp-ejs package is
+# missing. Off by default (it runs downloaded JS); the safer fix is `pip install -U "yt-dlp[default]"`.
+YTDLP_REMOTE_COMPONENTS = _bool("YTDLP_REMOTE_COMPONENTS", False)
 DOWNLOAD_DIR = "downloads"
 
 # ---- Feeds (verify these URLs still work) ----
 RSS_FEEDS = {
-    "Anime News Network": "https://www.animenewsnetwork.com/encyclopedia/reports.xml?id=155&n=all",
+    # A feed can be one URL or a list of alternatives: they are tried in order until one answers.
+    "Anime News Network": [
+        "https://www.animenewsnetwork.com/news/rss.xml?ann-edition=us",
+        "https://www.animenewsnetwork.com/all/rss.xml?ann-edition=us",
+    ],
     "Crunchyroll News": "https://www.crunchyroll.com/news/rss",
     "Anime Corner": "https://animecorner.me/feed/",
-    "Anime Trending": "https://anitrendz.net/news/feed",
+    "Anime Trending": "https://anitrendz.net/news/feed/",
 }
 
 # ---- Daily report ----

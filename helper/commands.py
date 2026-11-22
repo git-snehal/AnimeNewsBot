@@ -17,6 +17,8 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
     BotCommand("stats", "Posts today (or: yesterday, week)"),
     BotCommand("status", "Bot health, feeds and next check"),
     BotCommand("fetchnow", "Check the feeds right now"),
+    BotCommand("feeds", "Test every RSS feed and show which ones work"),
+    BotCommand("testtrailer", "Test trailer lookup: /testtrailer [link] [send]"),
     BotCommand("pause", "Pause posting"),
     BotCommand("resume", "Resume posting"),
     BotCommand("setcookies", "Reply to a cookies.txt file to update yt-dlp cookies"),

@@ -39,7 +39,8 @@ class Database:
             ("source", "TEXT"),
             ("kind", "TEXT"),
             ("has_video", "INTEGER DEFAULT 0"),
-            ("status", "TEXT DEFAULT 'posted'"),  # posted | seeded | skipped | imported
+            ("status", "TEXT DEFAULT 'posted'"),  # posted | seeded | skipped | duplicate | imported
+            ("story_key", "TEXT"),                 # "<show>|<kind>": same story from another outlet
         ):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE articles ADD COLUMN {name} {ddl}")
@@ -69,13 +70,25 @@ class Database:
         ).fetchone()
         return row is not None
 
-    def add_posted(self, link: str, title: str, source=None, kind=None, has_video=False, status="posted"):
+    def add_posted(self, link: str, title: str, source=None, kind=None, has_video=False, status="posted", story_key=None):
         self.conn.execute(
-            "INSERT OR IGNORE INTO articles (link, title_norm, posted_at, source, kind, has_video, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (link, norm_title(title), int(time.time()), source, kind, int(bool(has_video)), status),
+            "INSERT OR IGNORE INTO articles (link, title_norm, posted_at, source, kind, has_video, status, story_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (link, norm_title(title), int(time.time()), source, kind, int(bool(has_video)), status, story_key),
         )
         self.conn.commit()
+
+    STORY_WINDOW = 48 * 3600
+
+    def story_posted_recently(self, story_key: str) -> bool:
+        """Has the same show + news type already been posted (by any outlet) in the last 48h?"""
+        if not story_key:
+            return False
+        cutoff = int(time.time()) - self.STORY_WINDOW
+        return self.conn.execute(
+            "SELECT 1 FROM articles WHERE story_key = ? AND status IN ('posted', 'seeded') AND posted_at >= ?",
+            (story_key, cutoff),
+        ).fetchone() is not None
 
     # ------------------------------------------------------------------ statistics
     def stats(self, start_ts: int, end_ts: int) -> dict:
@@ -88,7 +101,12 @@ class Database:
             "SELECT COUNT(*) FROM articles WHERE status = 'skipped' AND posted_at >= ? AND posted_at < ?",
             (start_ts, end_ts),
         ).fetchone()[0]
+        duplicates = self.conn.execute(
+            "SELECT COUNT(*) FROM articles WHERE status = 'duplicate' AND posted_at >= ? AND posted_at < ?",
+            (start_ts, end_ts),
+        ).fetchone()[0]
         return {
+            "duplicates": duplicates,
             "posted": len(rows),
             "media": len(media),
             "with_video": sum(1 for r in media if r[2]),

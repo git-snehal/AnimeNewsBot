@@ -16,7 +16,7 @@ async def main():
     async with httpx.AsyncClient() as client:
         for name, url in RSS_FEEDS.items():
             _, entries = await _fetch_feed(client, name, url)
-            print(f"\n=== {name}: {len(entries)} entries ({url})")
+            print(f"\n=== {name}: {len(entries)} entries")
             if not entries:
                 print("   (feed empty or failed - check the URL / your network)")
                 continue

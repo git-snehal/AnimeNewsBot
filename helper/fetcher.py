@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 import httpx
@@ -12,8 +13,34 @@ from helper.state import state
 
 log = logging.getLogger(__name__)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AnimeNewsBot/2.0; +rss)"}
+UA_BROWSER = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+# Tried in this order. Some sites (ANN, for one) answer 403 to anything that doesn't look like a browser or a reader.
+HEADER_PROFILES = [
+    {"User-Agent": UA_BROWSER, "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+     "Accept-Language": "en-US,en;q=0.9"},
+    {"User-Agent": "Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)", "Accept": "*/*"},
+    {"User-Agent": "Mozilla/5.0 (compatible; AnimeNewsBot/2.0)"},
+]
+PAGE_HEADERS = HEADER_PROFILES[0]
 _BAD_IMG = ("icon", "pixel", "avatar", "emoji", "spacer", "logo", "1x1")
+_TRACKING = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "igshid")
+
+
+def clean_link(url: str) -> str:
+    """Drop tracking parameters (?utm_source=rss...) so links are stable and tidy."""
+    try:
+        parts = urlsplit(url)
+        q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not k.lower().startswith(_TRACKING)]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), ""))
+    except Exception:
+        return url
+
+
+def feed_urls(value) -> list:
+    return [value] if isinstance(value, str) else list(value)
 
 
 def extract_image(entry):
@@ -53,20 +80,45 @@ def _published(entry):
     return datetime(*t[:6], tzinfo=timezone.utc) if t else None
 
 
-async def _fetch_feed(client: httpx.AsyncClient, name: str, url: str):
-    try:
-        r = await client.get(url, headers=HEADERS, timeout=20, follow_redirects=True)
-        r.raise_for_status()
-        parsed = await asyncio.to_thread(feedparser.parse, r.content)
-        state.feeds[name] = {"ok": True, "entries": len(parsed.entries), "error": "", "at": datetime.now(timezone.utc)}
-        return name, parsed.entries
-    except Exception as e:
-        log.warning("Feed %s failed: %s", name, e)
-        state.feeds[name] = {"ok": False, "entries": 0, "error": str(e)[:80], "at": datetime.now(timezone.utc)}
-        return name, []
+async def _fetch_feed(client: httpx.AsyncClient, name: str, value):
+    """Try every URL x header profile (the one that worked last time first) until a feed answers."""
+    combos = [(u, i) for u in feed_urls(value) for i in range(len(HEADER_PROFILES))]
+    pref = state.feed_pref.get(name)
+    if pref in combos:
+        combos.remove(pref)
+        combos.insert(0, pref)
+
+    attempts = []
+    for url, idx in combos:
+        try:
+            r = await client.get(url, headers=HEADER_PROFILES[idx], timeout=20, follow_redirects=True)
+            attempts.append(f"{r.status_code}")
+            if r.status_code != 200:
+                continue
+            parsed = await asyncio.to_thread(feedparser.parse, r.content)
+            if not parsed.entries:
+                attempts[-1] = "200 but no entries"
+                continue
+            if state.feed_pref.get(name) != (url, idx):
+                log.info("Feed %s: using %s (header profile %d)", name, url, idx)
+            state.feed_pref[name] = (url, idx)
+            state.feeds[name] = {"ok": True, "entries": len(parsed.entries), "error": "", "url": url,
+                                 "profile": idx, "attempts": attempts, "at": datetime.now(timezone.utc)}
+            return name, parsed.entries
+        except Exception as e:
+            attempts.append(type(e).__name__)
+    error = "blocked (HTTP 403)" if attempts and set(attempts) == {"403"} else "all attempts failed: " + ", ".join(attempts)
+    log.warning("Feed %s failed: %s", name, error)
+    state.feeds[name] = {"ok": False, "entries": 0, "error": error, "url": "", "profile": None,
+                         "attempts": attempts, "at": datetime.now(timezone.utc)}
+    return name, []
+
+
+fetch_feed = _fetch_feed
 
 
 async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES_PER_FEED):
+    """db=None skips the 'already posted' filter (used by the test commands)."""
     results = await asyncio.gather(*(_fetch_feed(client, n, u) for n, u in RSS_FEEDS.items()))
 
     articles, seen_links, seen_titles = [], set(), set()
@@ -75,8 +127,9 @@ async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES
             link, title = entry.get("link"), entry.get("title")
             if not link or not title:
                 continue
+            link = clean_link(link)
             tn = norm_title(title)
-            if link in seen_links or tn in seen_titles or db.is_posted(link, title):
+            if link in seen_links or tn in seen_titles or (db is not None and db.is_posted(link, title)):
                 continue
             seen_links.add(link)
             seen_titles.add(tn)

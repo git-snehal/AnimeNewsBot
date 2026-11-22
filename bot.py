@@ -1,22 +1,27 @@
 import asyncio
+import html
 import logging
 import os
 import shutil
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ParseMode
 
 from config import (
     ADMIN_IDS, API_HASH, API_ID, BOT_TOKEN, COOKIES_PATH, DAILY_STATS, DOWNLOAD_TRAILERS,
-    PAGE_VIDEO_FALLBACK, POLL_INTERVAL, TIMEZONE, TZ,
+    PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
 )
 from database.db import Database
+from helper.downloader import cleanup
+from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
 from helper.state import state
 from helper.stats import daily_stats_loop, day_report, week_report
+from helper.trailer_test import run_trailer_test
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -99,6 +104,47 @@ async def status_cmd(client, message):
         f"Posted all-time: {db.total_posted()}",
     ]
     await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & filters.command("feeds"))
+async def feeds_cmd(client, message):
+    status = await message.reply_text("⏳ Checking all feeds…")
+    async with httpx.AsyncClient() as http:
+        await asyncio.gather(*(fetch_feed(http, n, u) for n, u in RSS_FEEDS.items()))
+    lines = ["📡 <b>Feeds</b>", ""]
+    for name, f in state.feeds.items():
+        if f["ok"]:
+            host = f["url"].split("/")[2] if "//" in f["url"] else f["url"]
+            lines.append(f"✅ <b>{html.escape(name)}</b> — {f['entries']} entries ({html.escape(host)})")
+        else:
+            lines.append(f"❌ <b>{html.escape(name)}</b> — {html.escape(f['error'])}")
+            lines.append(f"      tried: {html.escape(', '.join(f['attempts']) or '-')}")
+    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & filters.command("testtrailer"))
+async def testtrailer_cmd(client, message):
+    args = message.command[1:]
+    send = any(a.lower() == "send" for a in args)
+    arg = next((a for a in args if a.lower() != "send"), None)
+    status = await message.reply_text("⏳ Testing the trailer lookup… this can take up to a minute.")
+    video = None
+    try:
+        async with httpx.AsyncClient() as http:
+            text, video = await run_trailer_test(http, arg, send)
+        await status.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        if video:
+            try:
+                await message.reply_video(
+                    video["path"], caption="✅ Test download", supports_streaming=True,
+                    duration=video["duration"], width=video["width"], height=video["height"])
+            except Exception as e:
+                await message.reply_text(f"❌ Upload failed: {html.escape(str(e))}")
+    except Exception as e:
+        await status.edit_text(f"❌ Test crashed: {html.escape(str(e))}")
+    finally:
+        if video:
+            cleanup(video["path"])
 
 
 @app.on_message(admin_only & filters.command("fetchnow"))
