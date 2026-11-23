@@ -11,6 +11,7 @@ class BotState:
         self.last_cycle_at = None
         self.last_cycle_found = 0
         self.feed_pref = {}  # name -> (url, header profile index) that worked last time
+        self.feed_blocked_until = {}  # name -> unix time before which a fully blocked feed isn't retried
         self.feeds = {}  # name -> {"ok": bool, "entries": int, "error": str, "at": datetime}
 
 

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import datetime, timedelta, timezone
 
 import yt_dlp
 from yt_dlp import YoutubeDL
@@ -48,6 +49,7 @@ def js_runtimes() -> dict:
 def _base_opts() -> dict:
     opts = {
         "quiet": True,
+        "noprogress": True,
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 3,
@@ -171,16 +173,84 @@ def _diagnose_sync(url: str) -> dict:
     }
 
 
-def _search_sync(show: str, kind_name: str):
-    words = [w for w in show.lower().split() if len(w) > 2]
-    opts = _base_opts() | {"extract_flat": True}
-    with YoutubeDL(opts) as ydl:
-        res = ydl.extract_info(f"ytsearch5:{show} anime {kind_name} official", download=False)
-    for e in (res or {}).get("entries", []):
-        title = (e.get("title") or "").lower()
+_ORDINALS = {"second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6}
+_SEASON_NUM = re.compile(r"season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s+season|\bs(\d{1,2})\b|\b(second|third|fourth|fifth|sixth)\s+season", re.I)
+_BAD_TITLE = re.compile(r"\b(reaction|react|reacts|review|explained|breakdown|analysis|amv|gameplay|compilation|recap)\b")
+SEARCH_MAX_AGE_DAYS = 21
+
+
+def season_numbers(text: str) -> set:
+    out = set()
+    for a, b, c, word in _SEASON_NUM.findall(text or ""):
+        if word:
+            out.add(_ORDINALS[word.lower()])
+        else:
+            out.add(int(a or b or c))
+    return out
+
+
+def _search_sync(show: str, kind_name: str, article_title: str = "", published=None):
+    """Last-resort YouTube search. Deliberately strict: no video beats the wrong video.
+
+    A result is only accepted when its title contains every word of the show name, it is not a reaction/review/etc.,
+    its length fits, it doesn't name a different season than the article, and it was uploaded recently.
+    Returns {"url", "title", "channel"} or None.
+    """
+    words = [w for w in re.findall(r"[a-z0-9]+", show.lower()) if len(w) > 2]
+    if not words:
+        return None
+    want = season_numbers(article_title)
+    max_len = min(MAX_VIDEO_SECONDS, 600)
+
+    with YoutubeDL(_base_opts() | {"extract_flat": True}) as ydl:
+        res = ydl.extract_info(f"ytsearch8:{show} {kind_name} anime", download=False)
+
+    cands, why, entries = [], {}, (res or {}).get("entries") or []
+
+    def reject(reason):
+        why[reason] = why.get(reason, 0) + 1
+
+    for e in entries:
+        title = e.get("title") or ""
+        norm = " " + re.sub(r"[^a-z0-9]+", " ", title.lower()) + " "
         dur = e.get("duration") or 0
-        if words and all(w in title for w in words) and dur <= MAX_VIDEO_SECONDS and "reaction" not in title:
-            return f"https://www.youtube.com/watch?v={e['id']}"
+        if not e.get("id") or not all(w in norm for w in words):
+            reject("title lacks the show name")
+            continue
+        if _BAD_TITLE.search(norm):
+            reject("reaction/review/etc.")
+            continue
+        if dur and (dur > max_len or dur < 5):
+            reject("wrong length")
+            continue
+        got = season_numbers(title)
+        if (want and got and not (want & got)) or (not want and any(n >= 2 for n in got)):
+            reject("different season")  # e.g. the article is about season 2, this is a season 1 video
+            continue
+        cands.append({"url": f"https://www.youtube.com/watch?v={e['id']}", "title": title})
+
+    ref = (published or datetime.now(timezone.utc)).date()
+    for cand in cands[:3]:
+        try:
+            opts = _base_opts() | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(cand["url"], download=False)
+        except Exception:
+            reject("could not read the video")
+            continue
+        up = info.get("upload_date")
+        if up:
+            try:
+                if datetime.strptime(up, "%Y%m%d").date() < ref - timedelta(days=SEARCH_MAX_AGE_DAYS):
+                    reject("uploaded too long ago")  # probably a previous trailer of a show that just got news
+                    continue
+            except ValueError:
+                pass
+        cand["channel"] = info.get("channel") or info.get("uploader")
+        return cand
+
+    log.info("YouTube search found nothing for %r: %d results, rejected: %s", show, len(entries),
+             ", ".join(f"{n}x {r}" for r, n in why.items()) or "none")
     return None
 
 
@@ -208,9 +278,10 @@ async def diagnose_video(url: str) -> dict:
         return {"ok": False, "error": str(e), "n_formats": 0}
 
 
-async def search_trailer(show: str, kind_name: str):
+async def search_trailer(show: str, kind_name: str, article_title: str = "", published=None):
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_search_sync, show, kind_name), timeout=60)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_search_sync, show, kind_name, article_title, published), timeout=90)
     except Exception as e:
         log.warning("Trailer search failed for %r: %s", show, e)
         return None

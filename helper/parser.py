@@ -7,6 +7,8 @@ import html
 import re
 from datetime import datetime, timedelta, timezone
 
+from helper import story
+
 # --------------------------------------------------------------------------- text
 _DROP_BLOCKS = re.compile(r"(?is)<(script|style|iframe|figure|noscript)\b.*?</\1>")
 _BLOCK_END = re.compile(r"(?i)</(?:p|div|li|h[1-6]|blockquote)>|<br\s*/?>")
@@ -74,7 +76,10 @@ KIND_LABEL = {
 _KIND_DEFS = [
     ("trailer", re.compile(r"\btrailers?\b", re.I)),
     ("teaser", re.compile(r"\bteasers?\b", re.I)),
-    ("pv", re.compile(r"\bPVs?\b|\bpromo(?:tional)?\s+(?:video|clip)s?\b", re.I)),
+    ("pv", re.compile(
+        r"\bPVs?\b|\bpromo(?:tional)?\s+(?:video|clip)s?\b"
+        r"|\b(?:new|first|1st|2nd|3rd|second|third|main|short|latest)\s+videos?\b(?!\s+games?)"
+        r"|\bin\s+(?:a\s+|the\s+)?(?:new\s+|main\s+)?videos?\b(?!\s+games?)", re.I)),
     ("visual", re.compile(r"\bkey\s+visuals?\b|\bposter\b", re.I)),
     (
         "season",
@@ -105,24 +110,61 @@ def detect_kind(title: str, body: str, has_video: bool):
 
 
 # --------------------------------------------------------------------------- show title
-_VERBS = (
-    r"Reveals?|Unveils?|Gets|Announces?|Streams?|Debuts?|Premieres?|Releases?|Launches|Confirms?|Teases?"
-    r"|Shares?|Posts?|Drops?|Adds?|Casts|Lists|Sets|Delays?|Hits|Shows?|Previews?|Welcomes?|Brings?|Returns?"
-    r"|Unveil|Reveal|Announced|Revealed|Confirmed|Unveiled|Delayed|Released|Premiered"
-)
-_MODS = (
-    r"(?:TV|Anime|Film|Movie|Manga|Game|OVA|ONA|Live-Action|Original|Sequel|Final Season"
-    r"|Second Season|Third Season|Season \d+|\d+(?:st|nd|rd|th) Season)"
-)
-_SHOW_RE = re.compile(rf"^(.+?)\s+(?:{_MODS}\s+)*(?:{_VERBS})\b")
+_VERB_LIST = (
+    "Reveals Revealed Reveal Unveils Unveiled Unveil Gets Get Announces Announced Streams Streamed Debuts Debuted "
+    "Premieres Premiered Releases Released Launches Launched Confirms Confirmed Teases Teased Shares Shared Posts "
+    "Drops Dropped Adds Added Casts Cast Lists Sets Delays Delayed Hits Shows Previews Previewed Welcomes Brings "
+    "Returns Return Highlights Highlighted Introduces Introduced Features Joins Joined Ends Expands Opens Earns Wins "
+    "Licenses Licensed Stars Inspires Reaches Begins Starts Plans Lands Marks Receives Gains Publishes Reports "
+    "Updates Updated Offers Promises Counts Celebrates Collaborates Surpasses Tops Rises Falls Goes Becomes "
+    "Resumes Concludes Finishes Hints Pairs Teams Reunites Recruits Gives Takes Makes Streams"
+).split()
+_VERB_RE = re.compile(r"\s(?:" + "|".join(sorted(set(_VERB_LIST), key=len, reverse=True)) + r")\b")
+# words that describe the news rather than the show; stripped from the end of what comes before the verb
+_MOD_WORDS = {
+    "anime", "tv", "film", "movie", "manga", "game", "games", "ova", "ona", "season", "sequel", "final", "second",
+    "third", "fourth", "new", "main", "promo", "promotional", "video", "trailer", "teaser", "pv", "short",
+    "original", "series", "web", "novel", "novels", "light", "webtoon", "live-action", "part", "cour", "visual",
+    "key", "special", "theatrical", "full", "latest", "first",
+}
+_LEAD_STRIP = {"new", "live-action", "exclusive:", "exclusive", "interview:"}
+# companies / platforms that are the *subject of the sentence*, not the show
+_NOT_A_SHOW = {
+    "crunchyroll", "netflix", "hidive", "hulu", "disney+", "prime video", "amazon", "funimation", "viz", "viz media",
+    "yen press", "seven seas", "kodansha", "shueisha", "square enix", "sony", "aniplex", "toho", "kadokawa",
+    "oceanveil", "muse asia", "muse india", "bilibili", "tokyo mx", "gkids", "sentai", "discotek", "inklore",
+    "j-novel club", "k manga", "nakama press", "denpa", "vertical", "dark horse",
+}
+
+
+def _is_modifier(tok: str, prev: str) -> bool:
+    base = re.sub(r"['’]s$", "", tok).strip(",.:;!?").lower()
+    if base in _MOD_WORDS:
+        return True
+    if re.fullmatch(r"\d+(?:st|nd|rd|th)", base):
+        return True
+    if re.fullmatch(r"\d+", base) and prev.lower().strip(",.:;") in {"season", "part", "cour", "vol", "volume"}:
+        return True
+    return False
 
 
 def extract_show(title: str):
-    m = _SHOW_RE.match(title)
+    """The show/series the headline is about: everything before the first headline verb, minus descriptive words."""
+    m = _VERB_RE.search(title)
     if not m:
         return None
-    show = m.group(1).strip(" :-–—")
-    return show if 2 <= len(show) <= 70 else None
+    tokens = title[: m.start()].split()
+    while len(tokens) > 1 and tokens[0].lower() in _LEAD_STRIP:
+        tokens.pop(0)
+    while len(tokens) > 1 and _is_modifier(tokens[-1], tokens[-2]):
+        tokens.pop()
+    show = " ".join(tokens).strip(" :-–—,;")
+    if show[:1] in "'\"‘“" and show[-1:] in "'\"’”":
+        show = show[1:-1].strip()
+    show = show.strip(" :-–—,;")
+    if not (2 <= len(show) <= 100) or show.lower() in _NOT_A_SHOW:
+        return None
+    return show
 
 
 # --------------------------------------------------------------------------- date
@@ -214,6 +256,8 @@ _NAME = r"[A-Z][\w!&\-·]*(?:\s+[A-Z][\w!&\-·]*){0,2}"
 _STUDIO_PATTERNS = [
     re.compile(rf"\b(?:animated|animation|produced|production)\s+(?:is\s+|was\s+|will\s+be\s+)?(?:being\s+)?(?:handled\s+|produced\s+|created\s+)?(?:by|at)\s+(?:the\s+)?({_NAME})"),
     re.compile(r"\b(?:by|at|from|with)\s+(Studio\s+[A-Z][\w!&\-·]*)"),
+    # "Studio Tumble has dropped a new trailer..." / "the Studio Tumble and Flint Sugar co-production"
+    re.compile(r"(?:^|[.!?]\s+|\bthe\s+)(Studio\s+[A-Z][\w!&\-·]*)"),
 ]
 _STUDIO_SKIP = {"Netflix", "Crunchyroll", "Amazon", "Disney", "Hulu", "The"}
 
@@ -243,6 +287,10 @@ def enrich(article: dict, title: str, body: str) -> dict:
     else:
         label = KIND_LABEL.get(kind)
 
+    platform, studio = extract_platform(facts), extract_studio(facts)
+    show = extract_show(title)
+    title_words = story.tokens(title, drop_generic=True)
+    tok = story.tokens(show) if show else title_words
     sentences = split_sentences(body)
     if sentences and sentences[0].strip().lower() == title.strip().lower():
         sentences = sentences[1:]
@@ -252,9 +300,15 @@ def enrich(article: dict, title: str, body: str) -> dict:
         "title_en": title,
         "kind": kind,
         "is_media": kind in MEDIA_KINDS,
-        "show": extract_show(title),
+        "show": show,
+        "story_tokens": " ".join(sorted(tok)),
+        "title_tokens": " ".join(sorted(title_words)),
+        "search_name": show or " ".join(title_words[:6]) or None,
         "label": label,
-        "info": [x for x in (date, extract_platform(facts), extract_studio(facts)) if x],
+        "date": date,
+        "platform": platform,
+        "studio": studio,
+        "info": [x for x in (date, platform, studio) if x],
         "sentences": sentences,
         "youtube_url": youtube,
     }

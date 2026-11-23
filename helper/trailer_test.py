@@ -2,16 +2,18 @@
 import asyncio
 import html
 
+from config import YT_SEARCH_FALLBACK
 from helper.downloader import (
     diagnose_video,
     download_trailer_verbose,
     environment_info,
     explain,
     runtime_warnings,
+    search_trailer,
 )
 from helper.fetcher import fetch_new_articles
 from helper.pagevideo import fetch_page_info
-from helper.parser import clean_text, enrich, extract_youtube_url
+from helper.parser import KIND_NAME, clean_text, enrich, extract_youtube_url
 
 
 def _esc(s) -> str:
@@ -55,7 +57,14 @@ async def _targets(http, arg):
             if not yt and info["video"]:
                 yt, how = info["video"], f"page ({info['where']})"
             image = image or info["image"]
-        out.append({"label": e["title_en"][:80], "yt": yt, "how": how, "image": image, "kind": e["kind"]})
+        matched = None
+        name = e.get("show") or e.get("search_name")
+        if not yt and YT_SEARCH_FALLBACK and name:
+            m = await search_trailer(name, KIND_NAME[e["kind"]], e["title_en"], e.get("published"))
+            if m:
+                yt, how, matched = m["url"], "YouTube search", f"{m['title']} ({m.get('channel') or '?'})"
+        out.append({"label": e["title_en"][:80], "yt": yt, "how": how, "image": image, "kind": e["kind"],
+                    "matched": matched})
         if len(out) >= 3:
             break
     note = None if out else "No trailer/teaser/PV articles in the feeds right now. Try /testtrailer &lt;article link or YouTube link&gt;."
@@ -79,6 +88,8 @@ async def run_trailer_test(http, arg=None, send=False):
         )
         if t["yt"]:
             lines.append(f"   {_esc(t['yt'])}")
+        if t.get("matched"):
+            lines.append(f"   🔍 matched by search: “{_esc(t['matched'])}”. Check it's the right video.")
 
     video = None
     first = next((t for t in targets if t["yt"]), None)

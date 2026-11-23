@@ -12,26 +12,28 @@
 
 ## 🌟 Live Preview Layout
 
-Every post follows one clean layout: a bold title with a news-type label, a short quoted blurb with one highlighted detail, an info line (date • platform • studio) and your channel signature.
+**Trailers, teasers and PVs** (video posts) put everything on one header line: bold title, italic news type, and a bold `🎬 NEW TRAILER` tag, with the downloaded video attached and notification sound on.
 
-> **✦ Bride of the Barrier Master** — *Official Trailer Released*
+> **✦ Shadow Diver Donghua** — *Trailer Released*  |  🎬 **NEW TRAILER**
 >
-> > Netflix just dropped a stunning new trailer ahead of its global debut. Mark your calendars—this magical romance kicks off with a **1-hour special** on January 6!
+> > Studio Tumble has dropped a new trailer for the Shadow Diver (Long Xin Shaonu) donghua film. The Studio Tumble and Flint Sugar co-production, which is also a Made by Bilibili title, …
 >
-> **January 6, 2027 • Netflix • Studio TROYCA**
+> **January 6, 2027** • **Netflix** • Studio **TROYCA**
 >
-> > @OD3NS_ANIMES
+> > **╰ @Od3nsAnimeNews**
 
-**Trailers, teasers and PVs are highlighted** so they get noticed: a `🎬 NEW TRAILER` line on top, a `▶` before the info line, the actual video attached, and a notification sound. Regular news is sent silently.
+**Regular news** uses the same layout with a plain `✦ **Show** — *Label*` header (no tag) and is sent silently.
 
-**Long articles stay tidy:** a blurb of two sentences or fewer is a normal quote. Anything longer is written in full inside a collapsed, tap-to-expand quote.
+* The info line is `Date • Platform • Studio X`. The date, platform and studio name are bold, the word "Studio" is plain, and anything the bot can't find is simply left out.
+* **Long articles stay tidy:** a blurb of two sentences or fewer is a normal quote. Anything longer is written in full inside a collapsed, tap-to-expand quote.
+* The signature (`SIGNATURE` in `.env`, with the `╰ ` prefix) always sits in its own bold quote at the bottom.
 
 ---
 
 ## 🚀 Key Features
 
-* **🤖 Fully Autonomous RSS Aggregator:** scans Anime News Network, Crunchyroll News, Anime Corner and Anime Trending concurrently.
-* **🧠 Smart Deduplication:** SQLite tracking by link and headline, and the same story (same show + same news type) from several outlets within 48 hours is posted once, using the outlet whose page actually has the trailer video.
+* **🤖 Fully Autonomous RSS Aggregator:** scans Anime News Network (India edition), Crunchyroll News, Anime Corner and Anime Trending concurrently. ANN's "all" feed is filtered to real news (reviews, advertorials, columns and game / live-action / industry-only items are dropped; see `config.py`).
+* **🧠 Smart Deduplication:** SQLite tracking by link and headline. The same story from several outlets within 48 hours is posted once: trailers/teasers/PVs and typed news (season, cast, date...) match on the show name and news type, plain news matches on the headline's key words. If the first outlet only had a photo and a later one has the trailer video, the bot edits the video into the original post.
 * **🧩 Rule-Based Formatting (no paid API):** news type, show title, premiere date, platform and studio are extracted from the article text. A field that can't be found is simply left out.
 * **🎬 Trailer Videos (`yt-dlp`):** finds the YouTube video in the feed item, falls back to the article page (`og:video`, JSON-LD, embeds inside the article body only), downloads it and posts it with the news.
 * **🖼 Images Always:** uses the feed image, then the article's `og:image`, and uploads the picture itself if Telegram can't fetch the URL.
@@ -86,7 +88,7 @@ PIN_TRAILERS=false
 # --- trailers ---
 DOWNLOAD_TRAILERS=true
 PAGE_VIDEO_FALLBACK=true          # look for the video on the article page if the feed has none
-YT_SEARCH_FALLBACK=false          # YouTube search as a last resort (can pick the wrong video)
+YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no video: strict YouTube search
 YTDLP_REMOTE_COMPONENTS=false     # true = let yt-dlp fetch its YouTube solver script from GitHub
 MAX_VIDEO_MB=150
 MAX_VIDEO_SECONDS=600
@@ -95,6 +97,7 @@ COOKIES_PATH=cookies.txt
 
 # --- polling & report ---
 POLL_INTERVAL=600
+DISABLED_FEEDS=                   # feed names to switch off, comma separated
 SEED_ON_FIRST_RUN=true
 TIMEZONE=UTC                      # e.g. Asia/Kolkata, Europe/London
 DAILY_STATS=true
@@ -138,15 +141,19 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 2. The solver package: `pip install -U "yt-dlp[default]"`
 3. On a cloud server or Colab, YouTube often blocks the IP: send a `cookies.txt` and reply `/setcookies`.
 
-**A feed shows a 403 / is blocked** (Anime News Network especially): run `/feeds`. Each feed can be a list of alternative URLs in `config.py`, and the bot tries several browser-like request profiles and remembers the one that works. If every attempt is blocked, the site is rejecting your server's IP, and you can remove that feed or run the bot from a different network.
+**Anime News Network:** its feed blocks many cloud / Colab IPs (HTTP 403). It works from a normal VPS or home connection. Use the edition you want by changing `ann-edition=in` to `us` in `config.py`. Run `/feeds` to check.
 
-**Same story posted twice:** the bot treats the same show + news type within 48 hours as one story. Two stories of different types about one show (say a trailer and a cast reveal) are still posted separately.
+**A feed shows a 403 / is blocked:** run `/feeds`. A feed that is blocked everywhere is only retried once an hour. If your server's IP is simply refused, switch the feed off with `DISABLED_FEEDS=Anime News Network` in `.env`.
+
+**`/feeds` says "returns a web page, not an RSS feed":** that URL isn't a feed. Replace it in `config.py`. Each feed can be a list of alternative URLs in `config.py`, and the bot tries several browser-like request profiles and remembers the one that works. If every attempt is blocked, the site is rejecting your server's IP, and you can remove that feed or run the bot from a different network.
+
+**Same story posted twice:** the bot treats the same show + news type within 48 hours as one story (a trailer, teaser and PV of one show count as the same). Two stories of different types about one show (say a trailer and a cast reveal) are still posted separately, and plain news is only merged when the headlines share at least 3 key words.
 
 ---
 
 ## 📝 Notes
 
-* **Video lookup order for trailer articles:** the feed item, then the article page, then (optionally) a YouTube search. If nothing is found, the post goes out without a video and nothing is guessed.
+* **Video lookup order for trailer articles:** the feed item, then the article page, then a strict YouTube search (`YT_SEARCH_FALLBACK`). The search only accepts a video whose title has every word of the show name, matches the season, isn't a reaction/review, fits the length limit and was uploaded in the last 3 weeks. `/testtrailer` shows what it matched, so you can check it. If nothing passes, the post goes out without a video.
 * If a video can't be downloaded (too big, too long, blocked), the post is sent with the image instead.
 * Telegram limits captions to 1024 characters, so very long articles are trimmed at a sentence boundary.
 * Date, platform and studio detection is rule-based and best effort. If a detail isn't in the article text, it is left out.

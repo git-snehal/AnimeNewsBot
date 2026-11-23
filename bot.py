@@ -110,7 +110,7 @@ async def status_cmd(client, message):
 async def feeds_cmd(client, message):
     status = await message.reply_text("⏳ Checking all feeds…")
     async with httpx.AsyncClient() as http:
-        await asyncio.gather(*(fetch_feed(http, n, u) for n, u in RSS_FEEDS.items()))
+        await asyncio.gather(*(fetch_feed(http, n, u, force=True) for n, u in RSS_FEEDS.items()))
     lines = ["📡 <b>Feeds</b>", ""]
     for name, f in state.feeds.items():
         if f["ok"]:

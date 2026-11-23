@@ -92,15 +92,14 @@ def parse_video_from_html(page: str):
 
 
 async def fetch_page_info(client: httpx.AsyncClient, page_url: str) -> dict:
-    from helper.fetcher import PAGE_HEADERS  # late import: fetcher imports state, keep this module light
+    from helper.fetcher import get_page  # late import: keep this module light
 
     empty = {"video": None, "where": None, "image": None}
     try:
-        r = await client.get(page_url, headers=PAGE_HEADERS, timeout=15, follow_redirects=True)
-        r.raise_for_status()
+        r = await get_page(client, page_url)
         info = parse_page(r.text[:MAX_HTML], str(r.url))
     except Exception as e:
-        log.warning("Page lookup failed for %s: %s", page_url, e)
+        log.warning("Page lookup failed for %s: %s: %s", page_url, type(e).__name__, e)
         return empty
     log.info("Page lookup %s -> video: %s (%s) | image: %s", page_url[:90], info["video"] or "none",
              info["where"] or "-", "yes" if info["image"] else "no")

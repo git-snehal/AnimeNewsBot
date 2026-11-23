@@ -4,6 +4,8 @@ import sqlite3
 import time
 from collections import Counter
 
+from helper.story import kinds_compatible, same_news, same_story
+
 MEDIA_KINDS = ("trailer", "teaser", "pv")
 
 
@@ -40,7 +42,12 @@ class Database:
             ("kind", "TEXT"),
             ("has_video", "INTEGER DEFAULT 0"),
             ("status", "TEXT DEFAULT 'posted'"),  # posted | seeded | skipped | duplicate | imported
-            ("story_key", "TEXT"),                 # "<show>|<kind>": same story from another outlet
+            ("story_key", "TEXT"),                 # (old versions)
+            ("story_tokens", "TEXT"),              # important words of the show name: same story from another outlet
+            ("title_tokens", "TEXT"),              # important words of the whole headline (plain-news matching)
+            ("message_id", "INTEGER"),             # the channel message, so a video can be added to it later
+            ("sent_as", "TEXT"),                   # video | photo | photo_upload | text
+            ("caption", "TEXT"),                   # exact HTML caption that was sent
         ):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE articles ADD COLUMN {name} {ddl}")
@@ -70,25 +77,44 @@ class Database:
         ).fetchone()
         return row is not None
 
-    def add_posted(self, link: str, title: str, source=None, kind=None, has_video=False, status="posted", story_key=None):
+    def add_posted(self, link: str, title: str, source=None, kind=None, has_video=False, status="posted",
+                   story_tokens=None, message_id=None, sent_as=None, caption=None, title_tokens=None):
         self.conn.execute(
-            "INSERT OR IGNORE INTO articles (link, title_norm, posted_at, source, kind, has_video, status, story_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (link, norm_title(title), int(time.time()), source, kind, int(bool(has_video)), status, story_key),
+            "INSERT OR IGNORE INTO articles (link, title_norm, posted_at, source, kind, has_video, status, "
+            "story_tokens, message_id, sent_as, caption, title_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (link, norm_title(title), int(time.time()), source, kind, int(bool(has_video)), status,
+             story_tokens, message_id, sent_as, caption, title_tokens),
         )
         self.conn.commit()
 
     STORY_WINDOW = 48 * 3600
 
-    def story_posted_recently(self, story_key: str) -> bool:
-        """Has the same show + news type already been posted (by any outlet) in the last 48h?"""
-        if not story_key:
-            return False
+    def find_story(self, story_tokens: str, kind, title_tokens: str = ""):
+        """The post (any outlet, last 48h) that covers the same story, or None.
+
+        News with a type (trailer, season, cast...) matches on show name + type.
+        Plain news (no type) matches on the whole headline, more strictly."""
         cutoff = int(time.time()) - self.STORY_WINDOW
-        return self.conn.execute(
-            "SELECT 1 FROM articles WHERE story_key = ? AND status IN ('posted', 'seeded') AND posted_at >= ?",
-            (story_key, cutoff),
-        ).fetchone() is not None
+        cols = ("id", "link", "kind", "story_tokens", "title_tokens", "status", "has_video", "message_id",
+                "sent_as", "caption")
+        rows = self.conn.execute(
+            f"SELECT {', '.join(cols)} FROM articles WHERE status IN ('posted', 'seeded') AND posted_at >= ? "
+            "ORDER BY id DESC", (cutoff,),
+        ).fetchall()
+        mine, mine_title = (story_tokens or "").split(), (title_tokens or "").split()
+        for r in rows:
+            row = dict(zip(cols, r))
+            if kind and kind != "news":
+                if (row["story_tokens"] and kinds_compatible(kind, row["kind"])
+                        and same_story(mine, row["story_tokens"].split())):
+                    return row
+            elif row["kind"] in (None, "news") and row["title_tokens"] and same_news(mine_title, row["title_tokens"].split()):
+                return row
+        return None
+
+    def mark_video_added(self, row_id: int):
+        self.conn.execute("UPDATE articles SET has_video = 1, sent_as = 'video' WHERE id = ?", (row_id,))
+        self.conn.commit()
 
     # ------------------------------------------------------------------ statistics
     def stats(self, start_ts: int, end_ts: int) -> dict:

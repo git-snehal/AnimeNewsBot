@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import httpx
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaVideo
 
 from config import (
     CHANNEL_ID,
@@ -23,13 +23,13 @@ from config import (
     SILENT_REGULAR_NEWS,
     YT_SEARCH_FALLBACK,
 )
-from database.db import norm_title
 from helper.downloader import cleanup, download_trailer, search_trailer
-from helper.fetcher import PAGE_HEADERS, fetch_new_articles
+from helper.fetcher import fetch_new_articles, get_page
 from helper.formatter import build_post
 from helper.pagevideo import fetch_page_info
 from helper.parser import KIND_NAME, clean_text, enrich
 from helper.state import state
+from helper.story import kinds_compatible, same_news, same_story
 from helper.translator import translate_if_needed
 
 log = logging.getLogger(__name__)
@@ -43,24 +43,24 @@ async def _prepare(article: dict) -> dict:
     return enrich(article, title, body)
 
 
-def story_key(a: dict):
-    """Same show + same kind of news = same story, whichever outlet wrote it."""
-    if a.get("show") and a.get("kind"):
-        return f"{norm_title(a['show'])}|{a['kind']}"
-    return None
+def _same(a: dict, b: dict) -> bool:
+    if a["kind"] and b["kind"]:
+        return kinds_compatible(a["kind"], b["kind"]) and same_story(a["story_tokens"].split(), b["story_tokens"].split())
+    if not a["kind"] and not b["kind"]:
+        return same_news(a["title_tokens"].split(), b["title_tokens"].split())
+    return False
 
 
 def group_stories(prepared: list) -> list:
-    groups, index = [], {}
+    """Articles in this batch about the same story (any outlet) end up in one group, oldest first."""
+    groups = []
     for a in prepared:
-        key = story_key(a)
-        if key and key in index:
-            index[key].append(a)
+        for g in groups:
+            if any(_same(m, a) for m in g):
+                g.append(a)
+                break
         else:
-            g = [a]
-            groups.append(g)
-            if key:
-                index[key] = g
+            groups.append([a])
     return groups
 
 
@@ -99,8 +99,7 @@ async def _flood_safe(factory):
 
 async def _image_file(client: httpx.AsyncClient, url: str):
     """Download the image ourselves, for when Telegram can't fetch the URL (hotlink protection, redirects...)."""
-    r = await client.get(url, headers=PAGE_HEADERS, timeout=20, follow_redirects=True)
-    r.raise_for_status()
+    r = await get_page(client, url, timeout=20)
     ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
     if not ctype.startswith("image/") or len(r.content) > 10 * 1024 * 1024:
         raise ValueError(f"not a usable image ({ctype}, {len(r.content)} bytes)")
@@ -148,17 +147,58 @@ async def _send(app, client, a: dict, text: str, kb, video):
 
 
 # ------------------------------------------------------------------ one story
+def _mark_duplicates(db, group, skip=None):
+    for a in group:
+        if a is not skip:
+            db.add_posted(a["link"], a["title"], source=a["source"], kind=a["kind"], status="duplicate",
+                          story_tokens=a["story_tokens"], title_tokens=a["title_tokens"])
+
+
+async def _add_video_to_earlier_post(app, db, client, group: list, match: dict) -> bool:
+    """An earlier post about this story went out as a photo; another outlet has the video: edit it into the post."""
+    video = None
+    try:
+        source = None
+        for cand in group:
+            await _resolve(cand, client, want_video=True)
+            if cand["youtube_url"]:
+                source = cand
+                break
+        if not source:
+            return False
+        video = await download_trailer(source["youtube_url"])
+        if not video:
+            return False
+        media = InputMediaVideo(
+            video["path"], caption=match["caption"], parse_mode=ParseMode.HTML, supports_streaming=True,
+            duration=video["duration"], width=video["width"] or 0, height=video["height"] or 0)
+        await _flood_safe(lambda: app.edit_message_media(
+            CHANNEL_ID, match["message_id"], media, reply_markup=_keyboard({"link": match["link"]})))
+        db.mark_video_added(match["id"])
+        log.info("Added the video to the earlier post (message %s): %s", match["message_id"], group[0]["title_en"])
+        return True
+    except Exception:
+        log.exception("Could not add the video to the earlier post")
+        return False
+    finally:
+        if video:
+            cleanup(video["path"])
+
+
 async def _process_group(app, db, group: list, client):
-    key = story_key(group[0])
-    if key and db.story_posted_recently(key):
-        for a in group:
-            db.add_posted(a["link"], a["title"], source=a["source"], status="duplicate", story_key=key)
-        log.info("Duplicate story skipped (%s): %s", key, group[0]["title_en"])
+    first = group[0]
+    match = db.find_story(first["story_tokens"], first["kind"], first["title_tokens"])
+    if match:
+        if (first["is_media"] and DOWNLOAD_TRAILERS and match["status"] == "posted" and not match["has_video"]
+                and match["sent_as"] in ("photo", "photo_upload") and match["message_id"] and match["caption"]):
+            await _add_video_to_earlier_post(app, db, client, group, match)
+        _mark_duplicates(db, group)
+        log.info("Same story already posted, skipped: %s", first["title_en"])
         return
 
-    primary, video = group[0], None
+    primary, video = first, None
     try:
-        want_video = group[0]["is_media"] and DOWNLOAD_TRAILERS
+        want_video = first["is_media"] and DOWNLOAD_TRAILERS
         if want_video:
             # several outlets cover the same trailer: use the first one whose page actually has the video
             for cand in group:
@@ -167,7 +207,7 @@ async def _process_group(app, db, group: list, client):
                     primary = cand
                     break
             else:
-                primary = next((c for c in group if c.get("image_url")), group[0])
+                primary = next((c for c in group if c.get("image_url")), first)
         else:
             await _resolve(primary, client, want_video=False)
         if not primary.get("image_url"):
@@ -175,20 +215,23 @@ async def _process_group(app, db, group: list, client):
 
         if want_video:
             url = primary["youtube_url"]
-            if not url and YT_SEARCH_FALLBACK and primary.get("show"):
-                url = await search_trailer(primary["show"], KIND_NAME[primary["kind"]])
-                primary["youtube_url"] = url
+            name = primary.get("show") or primary.get("search_name")
+            if not url and YT_SEARCH_FALLBACK and name:
+                found = await search_trailer(name, KIND_NAME[primary["kind"]], primary["title_en"], primary.get("published"))
+                if found:
+                    url = primary["youtube_url"] = found["url"]
+                    log.info("YouTube search matched %r (%s) for: %s", found["title"], found.get("channel"), primary["title_en"])
             if url:
                 video = await download_trailer(url)
 
-        msg, mode = await _send(app, client, primary, build_post(primary), _keyboard(primary), video)
+        text = build_post(primary)
+        msg, mode = await _send(app, client, primary, text, _keyboard(primary), video)
         db.add_posted(
-            primary["link"], primary["title"],
-            source=primary["source"], kind=primary["kind"] or "news", has_video=(mode == "video"), story_key=key,
+            primary["link"], primary["title"], source=primary["source"], kind=primary["kind"] or "news",
+            has_video=(mode == "video"), story_tokens=primary["story_tokens"], title_tokens=primary["title_tokens"],
+            message_id=getattr(msg, "id", None), sent_as=mode, caption=text,
         )
-        for a in group:
-            if a is not primary:
-                db.add_posted(a["link"], a["title"], source=a["source"], status="duplicate", story_key=key)
+        _mark_duplicates(db, group, skip=primary)
         log.info("Posted [%s, %s]: %s", primary["kind"] or "news", mode, primary["title_en"])
 
         if PIN_TRAILERS and primary["is_media"]:
@@ -236,11 +279,12 @@ async def broadcast_news_loop(app, db):
                     if SEED_ON_FIRST_RUN:
                         for article in articles:
                             try:
-                                key = story_key(await _prepare(article))
+                                a = await _prepare(article)
+                                kind, tokens, ttokens = a["kind"], a["story_tokens"], a["title_tokens"]
                             except Exception:
-                                key = None
-                            db.add_posted(article["link"], article["title"], source=article["source"],
-                                          status="seeded", story_key=key)
+                                kind, tokens, ttokens = None, None, None
+                            db.add_posted(article["link"], article["title"], source=article["source"], kind=kind,
+                                          status="seeded", story_tokens=tokens, title_tokens=ttokens)
                         log.info("First run: marked %d existing articles as seen, nothing posted.", len(articles))
                         articles = []
 

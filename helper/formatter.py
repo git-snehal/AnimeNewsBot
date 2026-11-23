@@ -1,12 +1,11 @@
 """Builds the HTML caption.
 
-  regular news                      trailers / teasers / PVs
-  ------------                      ------------------------
-  ✦ Show — Label                    🎬 NEW TRAILER
-  > two-sentence blurb              ✦ Show — Official Trailer Released
-  Date • Platform • Studio          > blurb
-  > @signature                      ▶ Date • Platform • Studio
-                                    > @signature
+  regular news                      trailers / teasers / PVs (video posts)
+  ------------                      --------------------------------------
+  ✦ Show — Label                    ✦ Show — Trailer Released  |  🎬 NEW TRAILER
+  > two-sentence blurb              > blurb
+  Date • Platform • Studio X        Date • Platform • Studio X
+  > ╰ @signature                    > ╰ @signature
 
 Blurb of up to 2 sentences -> normal quote. Longer -> full text (as much as fits) in a collapsed,
 tap-to-expand quote.
@@ -14,7 +13,7 @@ tap-to-expand quote.
 import html
 import re
 
-from config import SIGNATURE
+from config import SIGNATURE, SIGNATURE_PREFIX
 from helper.parser import KIND_NAME
 
 CAPTION_LIMIT = 1024  # Telegram caption limit; photo/video captions can't be longer
@@ -64,22 +63,42 @@ def _bold_first(text: str) -> str:
     return _esc(text)
 
 
-def build_post(a: dict) -> str:
-    media = a["is_media"]
+def _studio_html(name: str) -> str:
+    """'Studio' in plain text, the studio's name in bold (unless the name already says Studio)."""
+    n = re.sub(r"^Studio\s+", "", name, flags=re.I).strip()
+    if re.search(r"\bstudios?\b", n, re.I):
+        return f"<b>{_esc(n)}</b>"
+    return f"Studio <b>{_esc(n)}</b>"
 
-    head = []
-    if media:
-        head.append(f"🎬 <b>NEW {KIND_NAME[a['kind']].upper()}</b>")
+
+def _info_html(a: dict) -> str:
+    """January 6, 2027 • Netflix • Studio TROYCA   (date and platform bold, the word Studio plain, name bold)"""
+    parts = []
+    if a.get("date"):
+        parts.append(f"<b>{_esc(a['date'])}</b>")
+    if a.get("platform"):
+        parts.append(f"<b>{_esc(a['platform'])}</b>")
+    if a.get("studio"):
+        parts.append(_studio_html(a["studio"]))
+    return " • ".join(parts)
+
+
+def _header_html(a: dict) -> str:
+    """✦ Show — Label            (regular news)
+       ✦ Show — Label  |  🎬 NEW TRAILER   (trailers, teasers, PVs: one line)"""
     if a.get("show") and a.get("label"):
-        head.append(f"✦ <b>{_esc(a['show'])}</b> — <i>{_esc(a['label'])}</i>")
+        line = f"✦ <b>{_esc(a['show'])}</b> — <i>{_esc(a['label'])}</i>"
     else:
-        head.append(f"✦ <b>{_esc(_cut(a['title_en'], 200))}</b>")
-    header = "\n".join(head)
+        line = f"✦ <b>{_esc(_cut(a['title_en'], 200))}</b>"
+    if a["is_media"]:
+        line += f"  |  🎬 <b>NEW {KIND_NAME[a['kind']].upper()}</b>"
+    return line
 
-    info = ""
-    if a["info"]:
-        info = f"{'▶ ' if media else ''}<b>{_esc(' • '.join(a['info']))}</b>"
-    signature = f"<blockquote>{_esc(SIGNATURE)}</blockquote>"
+
+def build_post(a: dict) -> str:
+    header = _header_html(a)
+    info = _info_html(a)
+    signature = f"<blockquote><b>{_esc(SIGNATURE_PREFIX + SIGNATURE)}</b></blockquote>"
 
     skeleton = "\n\n".join(p for p in (header, info, signature) if p)
     budget = CAPTION_LIMIT - _plain_len(skeleton) - 4 - SAFETY
