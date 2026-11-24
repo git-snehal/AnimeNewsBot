@@ -16,6 +16,7 @@ from config import (
     MAX_RETRIES,
     PAGE_VIDEO_FALLBACK,
     PIN_TRAILERS,
+    RSS_FEEDS,
     POLL_INTERVAL,
     POST_DELAY,
     SEED_ON_FIRST_RUN,
@@ -40,7 +41,10 @@ _failures = defaultdict(int)
 async def _prepare(article: dict) -> dict:
     title = await asyncio.to_thread(translate_if_needed, clean_text(article["title"]))
     body = await asyncio.to_thread(translate_if_needed, clean_text(article["body_html"]))
-    return enrich(article, title, body)
+    a = enrich(article, title, body)
+    rules = RSS_FEEDS.get(article["source"])
+    a["plain_header"] = bool(isinstance(rules, dict) and rules.get("plain_headers"))
+    return a
 
 
 def _same(a: dict, b: dict) -> bool:

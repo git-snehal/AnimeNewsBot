@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 
 import yt_dlp
@@ -46,7 +47,27 @@ def js_runtimes() -> dict:
     return found or {"deno": {}}
 
 
-def _base_opts() -> dict:
+class _Collector:
+    """Receives yt-dlp's own warnings/errors so we can show *why* it found no formats."""
+
+    def __init__(self):
+        self.lines = []
+
+    def debug(self, msg): pass
+
+    def info(self, msg): pass
+
+    def warning(self, msg): self._add(msg)
+
+    def error(self, msg): self._add(msg)
+
+    def _add(self, msg):
+        m = re.sub(r"\s+", " ", str(msg)).strip()
+        if m and "Deprecated Feature" not in m and m not in self.lines:
+            self.lines.append(m[:300])
+
+
+def _base_opts(collector=None) -> dict:
     opts = {
         "quiet": True,
         "noprogress": True,
@@ -55,6 +76,8 @@ def _base_opts() -> dict:
         "retries": 3,
         "js_runtimes": js_runtimes(),
     }
+    if collector is not None:
+        opts["logger"] = collector
     if YTDLP_REMOTE_COMPONENTS:
         opts["remote_components"] = ["ejs:github"]
     if os.path.exists(COOKIES_PATH):
@@ -67,6 +90,12 @@ def explain(error: str, formats_found=None) -> str:
     e = (error or "").lower()
     if "sign in to confirm" in e or "not a bot" in e:
         return "YouTube wants a logged-in session from this server. Send a cookies.txt and reply /setcookies."
+    if "challenge" in e and ("fail" in e or "solv" in e):
+        return ("yt-dlp could not run its YouTube challenge solver. Check `deno --version` (needs 2.3+), "
+                "or Node 22+, and that yt-dlp-ejs is installed.")
+    if "po token" in e or "po_token" in e:
+        return ("YouTube wants a 'PO token' for this client. See yt-dlp's PO Token guide "
+                "(the bgutil-ytdlp-pot-provider plugin automates it).")
     if "requested format is not available" in e or formats_found == 0:
         return ("YouTube returned no downloadable formats. Usually: no JavaScript runtime (install Deno, or Node 22+), "
                 "the EJS solver missing (pip install -U \"yt-dlp[default]\"), or a blocked server IP (add cookies).")
@@ -88,12 +117,19 @@ def _download_sync(url: str):
         "max_filesize": MAX_VIDEO_MB * 1024 * 1024,
         "match_filter": match_filter_func(f"duration <= {MAX_VIDEO_SECONDS} & !is_live"),
     }
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if not info:
-            return None
-        done = (info.get("requested_downloads") or [{}])[0]
-        path = done.get("filepath") or ydl.prepare_filename(info)
+    notes = _Collector()
+    opts["logger"] = notes
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                return None
+            done = (info.get("requested_downloads") or [{}])[0]
+            path = done.get("filepath") or ydl.prepare_filename(info)
+    except Exception:
+        if notes.lines:
+            log.warning("yt-dlp said: %s", " | ".join(notes.lines[:4]))
+        raise
 
     if not path or not os.path.exists(path):
         return None
@@ -113,8 +149,46 @@ def _runtime_version(path: str) -> str:
     try:
         out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
         return out.splitlines()[0] if out else "?"
-    except Exception:
-        return "?"
+    except Exception as e:
+        return f"? ({type(e).__name__})"
+
+
+def cookie_summary(path: str = None) -> dict:
+    """Is cookies.txt usable? Reports counts and whether a (non-expired) Google login is inside. Never shows values."""
+    path = path or COOKIES_PATH
+    if not os.path.exists(path):
+        return {"exists": False}
+    login_names = {"SID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO", "SAPISID", "__Secure-1PAPISID",
+                   "__Secure-3PAPISID", "HSID", "SSID"}
+    total = google = 0
+    logged_in, soonest, now = False, None, time.time()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_"):]
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                total += 1
+                if "youtube.com" in parts[0] or "google.com" in parts[0]:
+                    google += 1
+                    if parts[5] in login_names:
+                        try:
+                            exp = int(float(parts[4]))
+                        except ValueError:
+                            exp = 0
+                        if exp == 0 or exp > now:
+                            logged_in = True
+                            if exp:
+                                soonest = exp if soonest is None else min(soonest, exp)
+    except OSError:
+        return {"exists": True, "cookies": 0, "google": 0, "logged_in": False, "days": None}
+    return {"exists": True, "cookies": total, "google": google, "logged_in": logged_in,
+            "days": int((soonest - now) / 86400) if soonest else None}
 
 
 def environment_info() -> dict:
@@ -129,6 +203,7 @@ def environment_info() -> dict:
         "ejs": importlib.util.find_spec("yt_dlp_ejs") is not None,
         "remote_components": YTDLP_REMOTE_COMPONENTS,
         "cookies": os.path.exists(COOKIES_PATH),
+        "cookie_info": cookie_summary(),
     }
 
 
@@ -151,12 +226,13 @@ def runtime_warnings(env: dict) -> list:
 
 def _diagnose_sync(url: str) -> dict:
     """Metadata-only check: can yt-dlp see real, downloadable formats for this video?"""
-    opts = _base_opts() | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
+    notes = _Collector()
+    opts = _base_opts(notes) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        return {"ok": False, "error": str(e), "n_formats": 0}
+        return {"ok": False, "error": str(e), "n_formats": 0, "notes": notes.lines[:5]}
     fmts = [
         f for f in (info.get("formats") or [])
         if (f.get("vcodec") not in (None, "none") or f.get("acodec") not in (None, "none"))
@@ -170,6 +246,7 @@ def _diagnose_sync(url: str) -> dict:
         "best_height": max(heights) if heights else None,
         "title": info.get("title"),
         "duration": int(info.get("duration") or 0),
+        "notes": notes.lines[:5],
     }
 
 

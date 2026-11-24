@@ -86,7 +86,7 @@ def _info_html(a: dict) -> str:
 def _header_html(a: dict) -> str:
     """✦ Show — Label            (regular news)
        ✦ Show — Label  |  🎬 NEW TRAILER   (trailers, teasers, PVs: one line)"""
-    if a.get("show") and a.get("label"):
+    if a.get("show") and a.get("label") and not a.get("plain_header"):
         line = f"✦ <b>{_esc(a['show'])}</b> — <i>{_esc(a['label'])}</i>"
     else:
         line = f"✦ <b>{_esc(_cut(a['title_en'], 200))}</b>"

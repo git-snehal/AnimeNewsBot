@@ -1,19 +1,16 @@
 import os
 import re
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-# Settings live in config.env (next to this file), not .env
-ENV_FILE = Path(__file__).resolve().parent / "config.env"
-load_dotenv(ENV_FILE)
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.env"))
 
 
 def _env(name, default=None, required=False):
     value = os.getenv(name, default)
     if required and not value:
-        raise RuntimeError(f"Missing required environment variable: {name} (see config.env.example)")
+        raise RuntimeError(f"Missing required environment variable: {name} (set it in config.env, see config.env.example)")
     return value
 
 
@@ -40,6 +37,9 @@ DISCUSSION_LINK = _env("DISCUSSION_LINK", "")
 SHOW_SOURCE_BUTTON = _bool("SHOW_SOURCE_BUTTON", True)
 SILENT_REGULAR_NEWS = _bool("SILENT_REGULAR_NEWS", True)
 PIN_TRAILERS = _bool("PIN_TRAILERS", False)
+
+# Titles containing any of these (comma separated, case-insensitive) are never posted. Edit in config.env.
+BLOCKED_WORDS = [w.strip().lower() for w in _env("BLOCKED_WORDS", "puzzles vol,recap").split(",") if w.strip()]
 
 # ---- Polling ----
 POLL_INTERVAL = int(_env("POLL_INTERVAL", "600"))
@@ -78,6 +78,8 @@ RSS_FEEDS = {
         # features and lists, so only its /anime/news/ articles are used.
         "urls": ["https://comicbook.com/category/anime/feed/"],
         "allow_paths": ["/anime/news/"],
+        # their headlines rarely name the show ("Dark New Zombie Anime Confirms..."): use the headline as it is
+        "plain_headers": True,
     },
     "Crunchyroll News": [
         "https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss",  # their real feed lives on this API host

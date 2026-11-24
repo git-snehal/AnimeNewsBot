@@ -15,7 +15,7 @@ from config import (
     PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
 )
 from database.db import Database
-from helper.downloader import cleanup
+from helper.downloader import cleanup, cookie_summary
 from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
@@ -182,7 +182,12 @@ async def set_cookies_cmd(client, message):
     try:
         tmp = await client.download_media(message.reply_to_message, file_name="downloads/cookies_upload.txt")
         shutil.move(tmp, COOKIES_PATH)
-        await message.reply_text(f"✅ Cookies saved to `{os.path.abspath(COOKIES_PATH)}`. yt-dlp will use them from now on.")
+        c = cookie_summary()
+        if c.get("logged_in"):
+            check = f"✅ It contains a valid Google login ({c['cookies']} cookies)."
+        else:
+            check = "⚠️ But I can't find a valid Google login in it (exported while logged out, or expired). Export again while logged in."
+        await message.reply_text(f"Cookies saved to `{os.path.abspath(COOKIES_PATH)}`.\n{check}")
     except Exception as e:
         await message.reply_text(f"❌ Failed to save cookies: {e}")
 

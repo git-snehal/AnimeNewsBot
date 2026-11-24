@@ -32,7 +32,7 @@
 
 ## 🚀 Key Features
 
-* **🤖 Fully Autonomous RSS Aggregator:** scans Anime News Network (India edition), ComicBook.com (anime news), Crunchyroll News, Anime Corner and Anime Trending concurrently. ANN's "all" feed is filtered to its news sections (reviews and advertorials are dropped); ComicBook.com is limited to its `/anime/news/` articles. Each feed's rules live in `config.py`.
+* **🤖 Fully Autonomous RSS Aggregator:** scans Anime News Network (India edition), ComicBook.com (anime news), Crunchyroll News, Anime Corner and Anime Trending concurrently. ANN's "all" feed is filtered to its news sections (reviews and advertorials are dropped); ComicBook.com is limited to its `/anime/news/` articles and shown with its original headline. Each feed's rules live in `config.py`.
 * **🧠 Smart Deduplication:** SQLite tracking by link and headline. The same story from several outlets within 48 hours is posted once: trailers/teasers/PVs and typed news (season, cast, date...) match on the show name and news type, plain news matches on the headline's key words. If the first outlet only had a photo and a later one has the trailer video, the bot edits the video into the original post.
 * **🧩 Rule-Based Formatting (no paid API):** news type, show title, premiere date, platform and studio are extracted from the article text. A field that can't be found is simply left out.
 * **🎬 Trailer Videos (`yt-dlp`):** finds the YouTube video in the feed item, falls back to the article page (`og:video`, JSON-LD, embeds inside the article body only), downloads it and posts it with the news.
@@ -97,6 +97,7 @@ COOKIES_PATH=cookies.txt
 
 # --- polling & report ---
 POLL_INTERVAL=600
+BLOCKED_WORDS=puzzles vol,recap       # titles containing any of these are never posted
 DISABLED_FEEDS=                   # feed names to switch off, comma separated
 SEED_ON_FIRST_RUN=true
 TIMEZONE=UTC                      # e.g. Asia/Kolkata, Europe/London
@@ -145,6 +146,17 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 1. Make sure the server clock is right (`timedatectl`; `NTP service: active`).
 2. Run only one copy of the bot with this token.
 3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
+
+**Videos still don't download:** run `/testtrailer send`. It now shows:
+- whether `cookies.txt` really contains a valid Google login (a file exported while logged out, or an expired one, is the most common reason),
+- which JavaScript runtime was found, with its version (yt-dlp needs Deno 2.3+ or Node 22+) and whether the EJS solver is installed,
+- the actual warnings yt-dlp printed ("yt-dlp said: ...") and a hint for the likely fix.
+
+Python 3.11 or newer is recommended: yt-dlp has deprecated 3.10.
+
+**Anime News Network keeps answering 403 from your server:** test whether it's the server's address or the connection style:
+`pip install curl_cffi` then `python -c "from curl_cffi import requests; print(requests.get('https://www.animenewsnetwork.com/all/rss.xml?ann-edition=in', impersonate='chrome').status_code)"`.
+200 means ANN rejects the bot's connection style (it can be handled); 403 means your server's address is blocked (use a proxy, another network, or drop the feed).
 
 **Anime News Network:** its feed blocks many cloud / Colab IPs (HTTP 403). It works from a normal VPS or home connection. Use the edition you want by changing `ann-edition=in` to `us` in `config.py`. Run `/feeds` to check.
 

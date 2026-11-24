@@ -90,13 +90,26 @@ _KIND_DEFS = [
         ),
     ),
     ("date", re.compile(r"\b(?:release|premiere|air)\s+dates?\b|\bpremieres?\b|\bdebuts?\b", re.I)),
-    ("cast", re.compile(r"\bcast\b|\bvoice\s+actors?\b", re.I)),
+    ("cast", re.compile(
+        r"\bcasts\b|\bcast\s+(?:members?|additions?)\b|\b(?:more|new|additional|main|voice|returning|full|guest)\s+cast\b"
+        r"|\bvoice\s+actors?\b|\bjoins?\s+(?:the\s+)?cast\b", re.I)),
 ]
+# Headlines that mention a season/cast/date but aren't that kind of announcement ("Season 2 Preview", "Episode 8 Recap")
+_NOT_NEWS_TYPE = re.compile(
+    r"\b(?:episodes?\s+\w+|recaps?|previews?|reviews?|spoilers?|explained|rankings?|ranked|theor(?:y|ies)"
+    r"|everything we know|breaks silence)\b", re.I)
+_SEASON_NEWS = re.compile(
+    r"\b(?:gets?|announces?|announced|confirms?|confirmed|reveals?|unveils?|returns?|premieres?|debuts?|sequel"
+    r"|renewed|green-?lit|streams?|launches?)\b", re.I)
 
 
 def detect_kind(title: str, body: str, has_video: bool):
     for key, rx in _KIND_DEFS:
         if rx.search(title):
+            if key not in MEDIA_KINDS and _NOT_NEWS_TYPE.search(title):
+                continue
+            if key == "season" and not _SEASON_NEWS.search(title):
+                continue
             return key
     head = body[:400]
     for key, rx in _KIND_DEFS[:3]:
@@ -278,6 +291,8 @@ def enrich(article: dict, title: str, body: str) -> dict:
 
     facts = f"{title}. {body}"
     date = extract_date(facts, article.get("published"))
+    if kind == "season" and date and re.search(r"\b(?:premieres?|debuts?|release date|airs?)\b", title, re.I):
+        kind = "date"  # "Season 2 Anime Premieres on January 9": the date is the news
     if kind == "date" and not date:
         kind = None  # a "premiere date" label without a date would be a lie
 

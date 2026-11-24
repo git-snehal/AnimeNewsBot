@@ -24,11 +24,22 @@ def _ok(flag) -> str:
     return "✅" if flag else "❌"
 
 
+def _cookie_line(c: dict) -> str:
+    if not c.get("exists"):
+        return "   cookies: ❌ no cookies.txt (send one and reply /setcookies)"
+    if c.get("logged_in"):
+        days = f", login valid ~{c['days']} more days" if c.get("days") is not None else ""
+        return f"   cookies: ✅ {c['cookies']} cookies ({c['google']} Google/YouTube), logged in{days}"
+    return (f"   cookies: ⚠️ {c.get('cookies', 0)} cookies but NO valid Google login in them "
+            "(exported while logged out, or expired). Export again while logged in.")
+
+
 def _env_lines(env: dict) -> list:
     rt = ", ".join(f"{n} {v}" for n, v in env["runtimes"].items()) if env["runtimes"] else "none found"
     lines = [
         "⚙️ <b>Environment</b>",
-        f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])} · cookies {_ok(env['cookies'])}",
+        f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])}",
+        _cookie_line(env.get("cookie_info") or {}),
         f"   JS runtime: {_ok(env['runtimes'])} {_esc(rt)}",
         f"   EJS solver: {_ok(env['ejs'] or env['remote_components'])}",
     ]
@@ -114,7 +125,9 @@ async def run_trailer_test(http, arg=None, send=False):
                 lines.append("ℹ️ Add <code>send</code> to also download it and get the video here.")
         else:
             lines.append(f"❌ <b>YouTube check failed:</b> {_esc(d['error'][:300])}")
-            hint = explain(d["error"], d.get("n_formats"))
+            for note in d.get("notes", [])[:4]:
+                lines.append(f"   yt-dlp said: {_esc(note[:240])}")
+            hint = explain(" ".join(d.get("notes", [])) + " " + d["error"], d.get("n_formats"))
             if hint:
                 lines.append(f"💡 {_esc(hint)}")
     elif targets:

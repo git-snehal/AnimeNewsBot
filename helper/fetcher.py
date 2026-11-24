@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import feedparser
 import httpx
 
-from config import ENTRIES_PER_FEED, RSS_FEEDS
+from config import BLOCKED_WORDS, ENTRIES_PER_FEED, RSS_FEEDS
 from database.db import norm_title
 from helper.state import state
 
@@ -68,7 +68,8 @@ def clean_link(url: str) -> str:
     try:
         parts = urlsplit(url)
         q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not k.lower().startswith(_TRACKING)]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), ""))
+        host = "www.crunchyroll.com" if parts.netloc == "crunchyroll.com" else parts.netloc  # the bare host answers 403
+        return urlunsplit((parts.scheme, host, parts.path, urlencode(q), ""))
     except Exception:
         return url
 
@@ -201,6 +202,8 @@ async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES
         for entry in wanted[:limit]:
             link, title = entry.get("link"), entry.get("title")
             if not link or not title:
+                continue
+            if any(w in title.lower() for w in BLOCKED_WORDS):
                 continue
             link = clean_link(link)
             tn = norm_title(title)
