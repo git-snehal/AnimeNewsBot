@@ -19,6 +19,7 @@ from helper.downloader import cleanup
 from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
+from helper.startup import start_with_retry
 from helper.state import state
 from helper.stats import daily_stats_loop, day_report, week_report
 from helper.trailer_test import run_trailer_test
@@ -187,7 +188,7 @@ async def set_cookies_cmd(client, message):
 
 
 async def main():
-    await app.start()
+    await start_with_retry(app, "anime_news_bot")
     await register_commands(app)
     log.info("Bot started. Admins: %s", ADMIN_IDS)
     tasks = [

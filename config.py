@@ -1,16 +1,19 @@
 import os
 import re
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Settings live in config.env (next to this file), not .env
+ENV_FILE = Path(__file__).resolve().parent / "config.env"
+load_dotenv(ENV_FILE)
 
 
 def _env(name, default=None, required=False):
     value = os.getenv(name, default)
     if required and not value:
-        raise RuntimeError(f"Missing required environment variable: {name} (see .env.example)")
+        raise RuntimeError(f"Missing required environment variable: {name} (see config.env.example)")
     return value
 
 
@@ -69,8 +72,12 @@ RSS_FEEDS = {
         ],
         # The "all" feed also carries episode reviews, advertorials, columns... Only these sections are news:
         "allow_paths": ["/news/", "/interest/", "/daily-briefs/"],
-        # ...and skip items that are only about games, live-action shows, Korean comics or industry matters
-        "allow_categories": ["Anime", "Manga", "Animation", "Music", "People", "Events", "Merch"],
+    },
+    "ComicBook.com": {
+        # Covers big manga/anime news that the others miss (e.g. One Piece volume covers). The feed also has
+        # features and lists, so only its /anime/news/ articles are used.
+        "urls": ["https://comicbook.com/category/anime/feed/"],
+        "allow_paths": ["/anime/news/"],
     },
     "Crunchyroll News": [
         "https://cr-news-api-service.prd.crunchyrollsvc.com/v1/en-US/rss",  # their real feed lives on this API host
