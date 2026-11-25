@@ -7,12 +7,14 @@ from helper.downloader import (
     diagnose_video,
     download_trailer_verbose,
     environment_info,
+    probe_video,
     explain,
     runtime_warnings,
     search_trailer,
 )
 from helper.fetcher import fetch_new_articles
 from helper.pagevideo import fetch_page_info
+from helper.state import state
 from helper.parser import KIND_NAME, clean_text, enrich, extract_youtube_url
 
 
@@ -134,3 +136,37 @@ async def run_trailer_test(http, arg=None, send=False):
         lines += ["", "No video link found for these, so there's nothing to download. The post would go out with the image."]
 
     return "\n".join(lines)[:4000], video
+
+
+async def run_probe_report(url: str) -> str:
+    """/ytprobe: try every yt-dlp setup against one video, keep the first that works."""
+    env = await asyncio.to_thread(environment_info)
+    results = await probe_video(url)
+    lines = ["🧪 <b>YouTube probe</b>", _esc(url), ""] + _env_lines(env) + [""]
+    if not results:
+        return "\n".join(lines + ["❌ The probe could not run (see the bot log)."])
+    first_ok = None
+    for r in results:
+        name = _esc(r["cfg"]["name"])
+        if r["ok"]:
+            best = f" (up to {r['best_height']}p)" if r["best_height"] else ""
+            lines.append(f"✅ {name}: {r['n_formats']} formats{best}")
+            first_ok = first_ok or r
+        else:
+            why = (r["notes"][0] if r["notes"] else r["error"]) or "failed"
+            lines.append(f"❌ {name}: {_esc(why[:110])}")
+    lines.append("")
+    if first_ok:
+        cfg = first_ok["cfg"]
+        state.yt_config = None if cfg["name"] == "default" else cfg
+        lines.append(f"✅ Downloads will use: <b>{_esc(cfg['name'])}</b>. Try <code>/testtrailer send</code>.")
+    else:
+        tips = []
+        if not env["runtimes"] or any((v or "").startswith("?") for v in env["runtimes"].values()):
+            tips.append("install Node 22 (a second JS runtime) and check `deno --version`")
+        c = env.get("cookie_info") or {}
+        if not c.get("logged_in"):
+            tips.append("send fresh cookies exported while logged in (/setcookies)")
+        tips.append("YouTube probably blocks this server's address: set YTDLP_PROXY in config.env, or run the bot from another network")
+        lines.append("❌ Nothing worked. Try: " + "; ".join(tips) + ".")
+    return "\n".join(lines)[:4000]

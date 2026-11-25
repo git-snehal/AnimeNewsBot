@@ -226,6 +226,7 @@ async def _process_group(app, db, group: list, client):
                     url = primary["youtube_url"] = found["url"]
                     log.info("YouTube search matched %r (%s) for: %s", found["title"], found.get("channel"), primary["title_en"])
             if url:
+                state.last_youtube_url = url
                 video = await download_trailer(url)
 
         text = build_post(primary)

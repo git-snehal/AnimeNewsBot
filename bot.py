@@ -22,7 +22,8 @@ from helper.news_job import broadcast_news_loop
 from helper.startup import start_with_retry
 from helper.state import state
 from helper.stats import daily_stats_loop, day_report, week_report
-from helper.trailer_test import run_trailer_test
+from helper.parser import extract_youtube_url
+from helper.trailer_test import run_probe_report, run_trailer_test
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -121,6 +122,17 @@ async def feeds_cmd(client, message):
             lines.append(f"❌ <b>{html.escape(name)}</b> — {html.escape(f['error'])}")
             lines.append(f"      tried: {html.escape(', '.join(f['attempts']) or '-')}")
     await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & filters.command("ytprobe"))
+async def ytprobe_cmd(client, message):
+    arg = message.command[1] if len(message.command) > 1 else ""
+    url = extract_youtube_url(arg) or state.last_youtube_url or "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    status = await message.reply_text("⏳ Trying different YouTube setups (JS runtime, client, cookies)… up to a minute.")
+    try:
+        await status.edit_text(await run_probe_report(url), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        await status.edit_text(f"❌ Probe crashed: {html.escape(str(e))}")
 
 
 @app.on_message(admin_only & filters.command("testtrailer"))

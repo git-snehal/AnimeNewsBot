@@ -18,6 +18,7 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
     BotCommand("status", "Bot health, feeds and next check"),
     BotCommand("fetchnow", "Check the feeds right now"),
     BotCommand("feeds", "Test every RSS feed and show which ones work"),
+    BotCommand("ytprobe", "Find a working YouTube download setup: /ytprobe [link]"),
     BotCommand("testtrailer", "Test trailer lookup: /testtrailer [link] [send]"),
     BotCommand("pause", "Pause posting"),
     BotCommand("resume", "Resume posting"),

@@ -19,10 +19,14 @@ from config import (
     MAX_VIDEO_HEIGHT,
     MAX_VIDEO_MB,
     MAX_VIDEO_SECONDS,
+    YTDLP_PROXY,
     YTDLP_REMOTE_COMPONENTS,
 )
 
+from helper.state import state
+
 log = logging.getLogger(__name__)
+PROBE_COOLDOWN = 1800  # seconds between automatic probes
 
 
 def _format_selector() -> str:
@@ -67,7 +71,24 @@ class _Collector:
             self.lines.append(m[:300])
 
 
-def _base_opts(collector=None) -> dict:
+def _apply_cfg(opts: dict, cfg) -> dict:
+    """Apply a yt-dlp setup (JS runtime subset / player client / cookies on-off). None = the one that worked last."""
+    cfg = cfg if cfg is not None else state.yt_config
+    if not cfg:
+        return opts
+    if cfg.get("runtimes"):
+        found = js_runtimes()
+        chosen = {n: found[n] for n in cfg["runtimes"] if n in found}
+        if chosen:
+            opts["js_runtimes"] = chosen
+    if cfg.get("client"):
+        opts["extractor_args"] = {"youtube": {"player_client": [cfg["client"]]}}
+    if cfg.get("cookies") is False:
+        opts.pop("cookiefile", None)
+    return opts
+
+
+def _base_opts(collector=None, cfg=None) -> dict:
     opts = {
         "quiet": True,
         "noprogress": True,
@@ -78,11 +99,13 @@ def _base_opts(collector=None) -> dict:
     }
     if collector is not None:
         opts["logger"] = collector
+    if YTDLP_PROXY:
+        opts["proxy"] = YTDLP_PROXY
     if YTDLP_REMOTE_COMPONENTS:
         opts["remote_components"] = ["ejs:github"]
     if os.path.exists(COOKIES_PATH):
         opts["cookiefile"] = COOKIES_PATH
-    return opts
+    return _apply_cfg(opts, cfg)
 
 
 def explain(error: str, formats_found=None) -> str:
@@ -106,10 +129,11 @@ def explain(error: str, formats_found=None) -> str:
     return ""
 
 
-def _download_sync(url: str):
+def _download_sync(url: str, cfg=None):
     """Returns a dict, or None when the duration/live filter rejected the video. Raises on real errors."""
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    opts = _base_opts() | {
+    notes = _Collector()
+    opts = _base_opts(notes, cfg) | {
         "format": _format_selector(),
         "merge_output_format": "mp4",
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
@@ -117,8 +141,6 @@ def _download_sync(url: str):
         "max_filesize": MAX_VIDEO_MB * 1024 * 1024,
         "match_filter": match_filter_func(f"duration <= {MAX_VIDEO_SECONDS} & !is_live"),
     }
-    notes = _Collector()
-    opts["logger"] = notes
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -217,6 +239,10 @@ def runtime_warnings(env: dict) -> list:
             out.append(f"Node {ver} is too old for yt-dlp (needs 22+).")
         if m and name == "deno" and (int(m.group(1)), int(m.group(2))) < (2, 3):
             out.append(f"Deno {ver} is too old for yt-dlp (needs 2.3+).")
+    for name, ver in env["runtimes"].items():
+        if (ver or "").startswith("?"):
+            out.append(f"Could not read {name}'s version {ver}. Run `{name} --version`: yt-dlp ignores Deno older than 2.3 "
+                       "and Node older than 22, and then YouTube returns no formats.")
     if not env["ejs"] and not env["remote_components"]:
         out.append('EJS solver not installed: pip install -U "yt-dlp[default]"')
     if not env["ffmpeg"]:
@@ -224,10 +250,10 @@ def runtime_warnings(env: dict) -> list:
     return out
 
 
-def _diagnose_sync(url: str) -> dict:
+def _diagnose_sync(url: str, cfg=None) -> dict:
     """Metadata-only check: can yt-dlp see real, downloadable formats for this video?"""
     notes = _Collector()
-    opts = _base_opts(notes) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
+    opts = _base_opts(notes, cfg) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -331,13 +357,70 @@ def _search_sync(show: str, kind_name: str, article_title: str = "", published=N
     return None
 
 
-async def download_trailer_verbose(url: str):
-    """-> (info_dict | None, error_text | None)"""
+def probe_configs() -> list:
+    """The yt-dlp setups worth trying when YouTube returns no formats."""
+    runtimes = list(js_runtimes().keys())
+    cfgs = [{"name": "default", "runtimes": None, "client": None, "cookies": True}]
+    if len(runtimes) > 1:
+        cfgs += [{"name": f"only {r}", "runtimes": [r], "client": None, "cookies": True} for r in runtimes]
+    if os.path.exists(COOKIES_PATH):
+        cfgs.append({"name": "default, without cookies", "runtimes": None, "client": None, "cookies": False})
+    cfgs += [{"name": f"{c} client", "runtimes": None, "client": c, "cookies": True} for c in ("tv", "mweb", "web_safari")]
+    cfgs.append({"name": "android_vr client (no cookies)", "runtimes": None, "client": "android_vr", "cookies": False})
+    return cfgs
+
+
+def _probe_sync(url: str, stop_on_success: bool = False) -> list:
+    out = []
+    for cfg in probe_configs():
+        d = _diagnose_sync(url, cfg)
+        out.append({"cfg": cfg, "ok": d["ok"], "n_formats": d["n_formats"], "best_height": d.get("best_height"),
+                    "error": d["error"], "notes": d.get("notes", [])})
+        if d["ok"] and stop_on_success:
+            break
+    return out
+
+
+async def probe_video(url: str, stop_on_success: bool = False) -> list:
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_probe_sync, url, stop_on_success), timeout=300)
+    except Exception as e:
+        log.warning("YouTube probe failed: %s", e)
+        return []
+
+
+def _is_blocking_error(err) -> bool:
+    e = (err or "").lower()
+    return "requested format is not available" in e or "sign in to confirm" in e or "not a bot" in e
+
+
+async def _try_download(url: str):
     try:
         info = await asyncio.wait_for(asyncio.to_thread(_download_sync, url), timeout=600)
         return info, (None if info else "skipped: video too long, too big or live")
     except Exception as e:
         return None, str(e)
+
+
+async def download_trailer_verbose(url: str):
+    """-> (info_dict | None, error_text | None). When YouTube blocks us, find a setup that works and retry once."""
+    info, err = await _try_download(url)
+    if info or not _is_blocking_error(err):
+        return info, err
+    if time.time() - state.last_probe_at < PROBE_COOLDOWN:
+        return info, err
+    state.last_probe_at = time.time()
+    log.info("YouTube is blocking this download. Trying other yt-dlp setups (JS runtime / client / cookies)...")
+    results = await probe_video(url, stop_on_success=True)
+    if results and results[-1]["ok"]:
+        cfg = results[-1]["cfg"]
+        state.yt_config = None if cfg["name"] == "default" else cfg
+        log.info("Found a working setup: %s. Retrying the download.", cfg["name"])
+        info, err = await _try_download(url)
+    else:
+        log.warning("No yt-dlp setup got formats from YouTube. Your server's address is probably blocked: "
+                    "set YTDLP_PROXY in config.env, or run /ytprobe for details.")
+    return info, err
 
 
 async def download_trailer(url: str):

@@ -89,6 +89,7 @@ PIN_TRAILERS=false
 DOWNLOAD_TRAILERS=true
 PAGE_VIDEO_FALLBACK=true          # look for the video on the article page if the feed has none
 YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no video: strict YouTube search
+YTDLP_PROXY=                      # optional proxy for YouTube only, e.g. socks5://127.0.0.1:40000
 YTDLP_REMOTE_COMPONENTS=false     # true = let yt-dlp fetch its YouTube solver script from GitHub
 MAX_VIDEO_MB=150
 MAX_VIDEO_SECONDS=600
@@ -120,6 +121,7 @@ The "/" menu is hardcoded in `helper/commands.py` and registered with Telegram o
 | `/status` | Running or paused, last check, feed health, cookies, all-time count |
 | `/fetchnow` | Check the feeds immediately |
 | `/feeds` | Test every RSS feed right now: which ones work, which are blocked |
+| `/ytprobe` | Tries every YouTube setup (JS runtime, player client, with/without cookies) on one video, shows which work, and makes downloads use the first one that does. `/ytprobe [YouTube link]` |
 | `/testtrailer` | Test the trailer pipeline: `/testtrailer` (newest trailer articles), `/testtrailer <article or YouTube link>`, add `send` to also download the video and get it here |
 | `/pause` / `/resume` | Stop / restart posting (nothing is skipped, new articles post after resume) |
 | `/setcookies` | Reply to a `cookies.txt` file to update yt-dlp cookies (private chat) |
@@ -147,7 +149,12 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 2. Run only one copy of the bot with this token.
 3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
 
-**Videos still don't download:** run `/testtrailer send`. It now shows:
+**Videos work on one machine but not on another (for example Colab works, your VPS doesn't):** YouTube treats cloud / datacenter addresses as bots far more often than home or Google-owned ones. The bot copes in three ways:
+1. When a download is blocked, it automatically tries other yt-dlp setups (each JS runtime on its own, other player clients, with and without cookies), remembers the first one that works, and retries. It does this at most once every 30 minutes.
+2. `/ytprobe` runs the same search on demand and shows the result for every setup.
+3. If nothing works, the server's address itself is blocked. Set `YTDLP_PROXY` in `config.env` to a proxy (it is used for YouTube only), or run the bot from another network.
+
+**Videos still don't download:** run `/ytprobe`, then `/testtrailer send`. It now shows:
 - whether `cookies.txt` really contains a valid Google login (a file exported while logged out, or an expired one, is the most common reason),
 - which JavaScript runtime was found, with its version (yt-dlp needs Deno 2.3+ or Node 22+) and whether the EJS solver is installed,
 - the actual warnings yt-dlp printed ("yt-dlp said: ...") and a hint for the likely fix.
@@ -155,7 +162,7 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 Python 3.11 or newer is recommended: yt-dlp has deprecated 3.10.
 
 **Anime News Network keeps answering 403 from your server:** test whether it's the server's address or the connection style:
-`pip install curl_cffi` then `python -c "from curl_cffi import requests; print(requests.get('https://www.animenewsnetwork.com/all/rss.xml?ann-edition=in', impersonate='chrome').status_code)"`.
+`pip install curl_cffi` then `python3 -c "from curl_cffi import requests; print(requests.get('https://www.animenewsnetwork.com/all/rss.xml?ann-edition=in', impersonate='chrome').status_code)"`.
 200 means ANN rejects the bot's connection style (it can be handled); 403 means your server's address is blocked (use a proxy, another network, or drop the feed).
 
 **Anime News Network:** its feed blocks many cloud / Colab IPs (HTTP 403). It works from a normal VPS or home connection. Use the edition you want by changing `ann-edition=in` to `us` in `config.py`. Run `/feeds` to check.

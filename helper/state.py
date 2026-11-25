@@ -12,6 +12,9 @@ class BotState:
         self.last_cycle_found = 0
         self.feed_pref = {}  # name -> (url, header profile index) that worked last time
         self.feed_blocked_until = {}  # name -> unix time before which a fully blocked feed isn't retried
+        self.yt_config = None          # the yt-dlp setup that worked last (see downloader.probe_configs)
+        self.last_probe_at = 0.0
+        self.last_youtube_url = None
         self.feeds = {}  # name -> {"ok": bool, "entries": int, "error": str, "at": datetime}
 
 
