@@ -15,7 +15,7 @@ from config import (
     PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
 )
 from database.db import Database
-from helper.downloader import cleanup, cookie_summary
+from helper.downloader import cleanup, cookie_summary, set_active_cfg
 from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
@@ -194,6 +194,8 @@ async def set_cookies_cmd(client, message):
     try:
         tmp = await client.download_media(message.reply_to_message, file_name="downloads/cookies_upload.txt")
         shutil.move(tmp, COOKIES_PATH)
+        set_active_cfg(None)          # new cookies: forget the old setup and let the bot search again
+        state.last_probe_at = 0
         c = cookie_summary()
         if c.get("logged_in"):
             check = f"✅ It contains a valid Google login ({c['cookies']} cookies)."

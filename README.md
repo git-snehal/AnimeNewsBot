@@ -149,6 +149,14 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 2. Run only one copy of the bot with this token.
 3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
 
+**No video, and `/ytprobe` says "No supported JavaScript runtime" / "Signature solving failed":** YouTube needs a JavaScript runtime for most clients, and yt-dlp only accepts Node.js 22+, Deno 2.3+ or Bun 1.2.11+. The bot now tests every runtime it finds and only hands yt-dlp the ones that work; `/testtrailer` and `/ytprobe` show which ones were rejected and why. On Ubuntu/Debian:
+```
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node --version      # must print v22 or higher
+```
+then restart the bot. Until a runtime works, the bot downloads without cookies (that setup is remembered across restarts), which is enough for most trailers.
+
 **Videos work on one machine but not on another (for example Colab works, your VPS doesn't):** YouTube treats cloud / datacenter addresses as bots far more often than home or Google-owned ones. The bot copes in three ways:
 1. When a download is blocked, it automatically tries other yt-dlp setups (each JS runtime on its own, other player clients, with and without cookies), remembers the first one that works, and retries. It does this at most once every 30 minutes.
 2. `/ytprobe` runs the same search on demand and shows the result for every setup.
@@ -161,9 +169,7 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 
 Python 3.11 or newer is recommended: yt-dlp has deprecated 3.10.
 
-**Anime News Network keeps answering 403 from your server:** test whether it's the server's address or the connection style:
-`pip install curl_cffi` then `python3 -c "from curl_cffi import requests; print(requests.get('https://www.animenewsnetwork.com/all/rss.xml?ann-edition=in', impersonate='chrome').status_code)"`.
-200 means ANN rejects the bot's connection style (it can be handled); 403 means your server's address is blocked (use a proxy, another network, or drop the feed).
+**Anime News Network keeps answering 403 from your server:** tested with a Chrome-impersonating client (`curl_cffi`) as well as plain `curl` and the bot: all get 403, so ANN is blocking your server's address, not the bot's connection style. Options: set up a proxy for it, run the bot from a home or other network, or switch the feed off with `DISABLED_FEEDS=Anime News Network`.
 
 **Anime News Network:** its feed blocks many cloud / Colab IPs (HTTP 403). It works from a normal VPS or home connection. Use the edition you want by changing `ann-edition=in` to `us` in `config.py`. Run `/feeds` to check.
 

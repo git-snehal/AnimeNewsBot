@@ -7,6 +7,7 @@ from helper.downloader import (
     diagnose_video,
     download_trailer_verbose,
     environment_info,
+    set_active_cfg,
     probe_video,
     explain,
     runtime_warnings,
@@ -14,7 +15,6 @@ from helper.downloader import (
 )
 from helper.fetcher import fetch_new_articles
 from helper.pagevideo import fetch_page_info
-from helper.state import state
 from helper.parser import KIND_NAME, clean_text, enrich, extract_youtube_url
 
 
@@ -42,7 +42,7 @@ def _env_lines(env: dict) -> list:
         "⚙️ <b>Environment</b>",
         f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])}",
         _cookie_line(env.get("cookie_info") or {}),
-        f"   JS runtime: {_ok(env['runtimes'])} {_esc(rt)}",
+        f"   JS runtime: {_ok(env.get('runtime_ok'))} {_esc(rt)}",
         f"   EJS solver: {_ok(env['ejs'] or env['remote_components'])}",
     ]
     lines += [f"   ⚠️ {_esc(w)}" for w in runtime_warnings(env)]
@@ -146,6 +146,8 @@ async def run_probe_report(url: str) -> str:
     if not results:
         return "\n".join(lines + ["❌ The probe could not run (see the bot log)."])
     first_ok = None
+    js_problem = any(("javascript runtime" in x.lower() or "signature solving failed" in x.lower() or "supported java" in x.lower())
+                     for r in results for x in r["notes"] + [r["error"]])
     for r in results:
         name = _esc(r["cfg"]["name"])
         if r["ok"]:
@@ -158,12 +160,16 @@ async def run_probe_report(url: str) -> str:
     lines.append("")
     if first_ok:
         cfg = first_ok["cfg"]
-        state.yt_config = None if cfg["name"] == "default" else cfg
-        lines.append(f"✅ Downloads will use: <b>{_esc(cfg['name'])}</b>. Try <code>/testtrailer send</code>.")
+        set_active_cfg(None if cfg["name"] == "default" else cfg)
+        lines.append(f"✅ Downloads will use: <b>{_esc(cfg['name'])}</b> (saved, survives restarts). Try <code>/testtrailer send</code>.")
+        if js_problem and cfg["name"] != "default":
+            lines.append("ℹ️ The default setup (with your cookies) fails because yt-dlp has no WORKING JavaScript runtime. "
+                         "Downloads run without cookies for now, which works. Installing Node.js 22+ and restarting the bot "
+                         "lets cookies work too.")
     else:
         tips = []
-        if not env["runtimes"] or any((v or "").startswith("?") for v in env["runtimes"].values()):
-            tips.append("install Node 22 (a second JS runtime) and check `deno --version`")
+        if not env.get("runtime_ok") or js_problem:
+            tips.append("install Node.js 22+ (yt-dlp has no working JavaScript runtime)")
         c = env.get("cookie_info") or {}
         if not c.get("logged_in"):
             tips.append("send fresh cookies exported while logged in (/setcookies)")

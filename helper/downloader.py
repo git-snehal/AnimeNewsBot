@@ -1,6 +1,7 @@
 """yt-dlp wrapper. Everything blocking runs in a worker thread."""
 import asyncio
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ from helper.state import state
 
 log = logging.getLogger(__name__)
 PROBE_COOLDOWN = 1800  # seconds between automatic probes
+CFG_FILE = os.path.join("database", "yt_config.json")  # the working setup survives restarts
 
 
 def _format_selector() -> str:
@@ -41,14 +43,48 @@ def _format_selector() -> str:
     )
 
 
-def js_runtimes() -> dict:
-    """YouTube needs a JavaScript runtime. yt-dlp only enables Deno unless told otherwise, so enable every one we find."""
+_MIN_VERSION = {"deno": (2, 3), "node": (22, 0), "bun": (1, 2)}   # what yt-dlp accepts
+_RT_CACHE = {}
+
+
+def _check_runtime(name: str, path: str) -> dict:
+    """Does this runtime actually run, and is it new enough for yt-dlp?"""
+    try:
+        r = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        return {"ok": False, "version": f"? ({type(e).__name__})", "reason": f"cannot be run ({type(e).__name__}: {str(e)[:60]})"}
+    first = ((r.stdout or r.stderr or "").strip().splitlines() or [""])[0]
+    m = re.search(r"(\d+)\.(\d+)", first)
+    if r.returncode != 0 or not m:
+        return {"ok": False, "version": "?", "reason": f"`{name} --version` gave exit code {r.returncode}: {first[:80] or 'no output'}"}
+    need = _MIN_VERSION.get(name)
+    if need and (int(m.group(1)), int(m.group(2))) < need:
+        return {"ok": False, "version": first[:40], "reason": f"version {first[:30]} is too old (needs {need[0]}.{need[1]}+)"}
+    return {"ok": True, "version": first[:40], "reason": ""}
+
+
+def runtime_status(name: str, path: str) -> dict:
+    key = (name, path)
+    if key not in _RT_CACHE:
+        _RT_CACHE[key] = _check_runtime(name, path)
+    return _RT_CACHE[key]
+
+
+def _found_runtimes() -> dict:
     found = {}
     for name, binary in (("deno", "deno"), ("node", "node"), ("bun", "bun"), ("quickjs", "qjs")):
         path = shutil.which(binary)
         if path:
             found[name] = {"path": path}
-    return found or {"deno": {}}
+    return found
+
+
+def js_runtimes() -> dict:
+    """YouTube needs a JavaScript runtime. Hand yt-dlp every one that really works (it only enables Deno by default).
+    A broken or too-old one is left out, so it can't be picked; if none works we pass what we found."""
+    found = _found_runtimes()
+    usable = {n: c for n, c in found.items() if n not in _MIN_VERSION or runtime_status(n, c["path"])["ok"]}
+    return usable or found or {"deno": {}}
 
 
 class _Collector:
@@ -69,6 +105,32 @@ class _Collector:
         m = re.sub(r"\s+", " ", str(msg)).strip()
         if m and "Deprecated Feature" not in m and m not in self.lines:
             self.lines.append(m[:300])
+
+
+def _load_cfg():
+    try:
+        with open(CFG_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) and "name" in cfg else None
+    except (OSError, ValueError):
+        return None
+
+
+def set_active_cfg(cfg):
+    """Use this yt-dlp setup from now on (None = the default one) and remember it across restarts."""
+    state.yt_config = cfg
+    try:
+        if cfg:
+            os.makedirs(os.path.dirname(CFG_FILE), exist_ok=True)
+            with open(CFG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+        elif os.path.exists(CFG_FILE):
+            os.remove(CFG_FILE)
+    except OSError as e:
+        log.warning("Could not save the yt-dlp setup: %s", e)
+
+
+state.yt_config = _load_cfg()
 
 
 def _apply_cfg(opts: dict, cfg) -> dict:
@@ -111,17 +173,20 @@ def _base_opts(collector=None, cfg=None) -> dict:
 def explain(error: str, formats_found=None) -> str:
     """Turn a yt-dlp error into something actionable."""
     e = (error or "").lower()
-    if "sign in to confirm" in e or "not a bot" in e:
-        return "YouTube wants a logged-in session from this server. Send a cookies.txt and reply /setcookies."
+    if "no supported javascript runtime" in e or "signature solving failed" in e or "supported java" in e:
+        return ("yt-dlp has no WORKING JavaScript runtime, so it can't solve YouTube's challenge. Install Node.js 22+ "
+                "(or Deno 2.3+) and restart the bot. This usually also explains the 'sign in to confirm you're not a bot' message.")
     if "challenge" in e and ("fail" in e or "solv" in e):
         return ("yt-dlp could not run its YouTube challenge solver. Check `deno --version` (needs 2.3+), "
                 "or Node 22+, and that yt-dlp-ejs is installed.")
+    if "sign in to confirm" in e or "not a bot" in e:
+        return "YouTube wants a logged-in session from this server. Send a cookies.txt and reply /setcookies."
     if "po token" in e or "po_token" in e:
         return ("YouTube wants a 'PO token' for this client. See yt-dlp's PO Token guide "
                 "(the bgutil-ytdlp-pot-provider plugin automates it).")
     if "requested format is not available" in e or formats_found == 0:
-        return ("YouTube returned no downloadable formats. Usually: no JavaScript runtime (install Deno, or Node 22+), "
-                "the EJS solver missing (pip install -U \"yt-dlp[default]\"), or a blocked server IP (add cookies).")
+        return ("YouTube returned no downloadable formats. Usually: no working JavaScript runtime (install Node.js 22+), "
+                "the EJS solver missing (pip install -U \"yt-dlp[default]\"), or a blocked server IP (add cookies / a proxy).")
     if "private video" in e or "unavailable" in e:
         return "The video is private, removed or region-locked."
     if "ffmpeg" in e or "ffprobe" in e:
@@ -167,14 +232,6 @@ def _download_sync(url: str, cfg=None):
     }
 
 
-def _runtime_version(path: str) -> str:
-    try:
-        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
-        return out.splitlines()[0] if out else "?"
-    except Exception as e:
-        return f"? ({type(e).__name__})"
-
-
 def cookie_summary(path: str = None) -> dict:
     """Is cookies.txt usable? Reports counts and whether a (non-expired) Google login is inside. Never shows values."""
     path = path or COOKIES_PATH
@@ -214,14 +271,19 @@ def cookie_summary(path: str = None) -> dict:
 
 
 def environment_info() -> dict:
-    runtimes = {}
-    for name, cfg in js_runtimes().items():
-        path = cfg.get("path")
-        runtimes[name] = _runtime_version(path) if path else "?"
+    runtimes, issues, usable = {}, [], False
+    for name, cfg in _found_runtimes().items():
+        st = runtime_status(name, cfg["path"]) if name in _MIN_VERSION else {"ok": True, "version": "found", "reason": ""}
+        runtimes[name] = st["version"]
+        usable = usable or st["ok"]
+        if not st["ok"]:
+            issues.append(f"{name}: {st['reason']}")
     return {
         "ytdlp": yt_dlp.version.__version__,
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "runtimes": runtimes,
+        "runtime_issues": issues,
+        "runtime_ok": usable,
         "ejs": importlib.util.find_spec("yt_dlp_ejs") is not None,
         "remote_components": YTDLP_REMOTE_COMPONENTS,
         "cookies": os.path.exists(COOKIES_PATH),
@@ -232,17 +294,9 @@ def environment_info() -> dict:
 def runtime_warnings(env: dict) -> list:
     out = []
     if not env["runtimes"]:
-        out.append("No JavaScript runtime found (need Deno 2.3+, Node 22+ or Bun 1.2.11+).")
-    for name, ver in env["runtimes"].items():
-        m = re.search(r"(\d+)\.(\d+)", ver or "")
-        if m and name == "node" and int(m.group(1)) < 22:
-            out.append(f"Node {ver} is too old for yt-dlp (needs 22+).")
-        if m and name == "deno" and (int(m.group(1)), int(m.group(2))) < (2, 3):
-            out.append(f"Deno {ver} is too old for yt-dlp (needs 2.3+).")
-    for name, ver in env["runtimes"].items():
-        if (ver or "").startswith("?"):
-            out.append(f"Could not read {name}'s version {ver}. Run `{name} --version`: yt-dlp ignores Deno older than 2.3 "
-                       "and Node older than 22, and then YouTube returns no formats.")
+        out.append("No JavaScript runtime found (need Node.js 22+, Deno 2.3+ or Bun 1.2.11+).")
+    for issue in env.get("runtime_issues", []):
+        out.append(f"JavaScript runtime problem, {issue}. yt-dlp ignores it, so YouTube returns no formats.")
     if not env["ejs"] and not env["remote_components"]:
         out.append('EJS solver not installed: pip install -U "yt-dlp[default]"')
     if not env["ffmpeg"]:
@@ -414,8 +468,8 @@ async def download_trailer_verbose(url: str):
     results = await probe_video(url, stop_on_success=True)
     if results and results[-1]["ok"]:
         cfg = results[-1]["cfg"]
-        state.yt_config = None if cfg["name"] == "default" else cfg
-        log.info("Found a working setup: %s. Retrying the download.", cfg["name"])
+        set_active_cfg(None if cfg["name"] == "default" else cfg)
+        log.info("Found a working setup: %s. Saved it and retrying the download.", cfg["name"])
         info, err = await _try_download(url)
     else:
         log.warning("No yt-dlp setup got formats from YouTube. Your server's address is probably blocked: "
