@@ -15,7 +15,7 @@ from config import (
     PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
 )
 from database.db import Database
-from helper.downloader import cleanup, cookie_summary, set_active_cfg
+from helper.downloader import cleanup, cookie_summary, environment_info, runtime_warnings, set_active_cfg
 from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
@@ -210,6 +210,11 @@ async def main():
     await start_with_retry(app, "anime_news_bot")
     await register_commands(app)
     log.info("Bot started. Admins: %s", ADMIN_IDS)
+    try:
+        for w in runtime_warnings(await asyncio.to_thread(environment_info)):
+            log.warning("YouTube downloads: %s", w)
+    except Exception:
+        log.exception("Could not check the YouTube setup")
     tasks = [
         asyncio.create_task(broadcast_news_loop(app, db)),
         asyncio.create_task(daily_stats_loop(app, db)),

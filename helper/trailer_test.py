@@ -36,12 +36,21 @@ def _cookie_line(c: dict) -> str:
             "(exported while logged out, or expired). Export again while logged in.")
 
 
+def _pot_line(p: dict) -> str:
+    if not p.get("enabled"):
+        return "   PO token: off (YOUTUBE_POT_ENABLED=false)"
+    plugin = f"✅ {_esc(p['plugin'])}" if p.get("plugin") else "❌ not installed"
+    server = "✅ reachable" if p.get("reachable") else "❌ not reachable"
+    return f"   PO token: plugin {plugin} · provider {server} ({_esc(p.get('url'))})"
+
+
 def _env_lines(env: dict) -> list:
     rt = ", ".join(f"{n} {v}" for n, v in env["runtimes"].items()) if env["runtimes"] else "none found"
     lines = [
         "⚙️ <b>Environment</b>",
         f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])}",
         _cookie_line(env.get("cookie_info") or {}),
+        _pot_line(env.get("pot") or {}),
         f"   JS runtime: {_ok(env.get('runtime_ok'))} {_esc(rt)}",
         f"   EJS solver: {_ok(env['ejs'] or env['remote_components'])}",
     ]
@@ -168,6 +177,9 @@ async def run_probe_report(url: str) -> str:
                          "lets cookies work too.")
     else:
         tips = []
+        pot = env.get("pot") or {}
+        if not (pot.get("plugin") and pot.get("reachable")):
+            tips.append("set up the PO-token provider like your other bot does (README: 'YouTube PO token provider')")
         if not env.get("runtime_ok") or js_problem:
             tips.append("install Node.js 22+ (yt-dlp has no working JavaScript runtime)")
         c = env.get("cookie_info") or {}

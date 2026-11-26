@@ -2,7 +2,8 @@ pyrofork>=2.3.60
 tgcrypto
 feedparser
 httpx
-yt-dlp[default]
+yt-dlp[default,curl-cffi]
+bgutil-ytdlp-pot-provider
 deep-translator
 python-dotenv
 beautifulsoup4

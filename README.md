@@ -89,6 +89,8 @@ PIN_TRAILERS=false
 DOWNLOAD_TRAILERS=true
 PAGE_VIDEO_FALLBACK=true          # look for the video on the article page if the feed has none
 YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no video: strict YouTube search
+YOUTUBE_POT_ENABLED=true           # use the PO-token provider when it is running
+YOUTUBE_POT_URL=http://127.0.0.1:4416
 YTDLP_PROXY=                      # optional proxy for YouTube only, e.g. socks5://127.0.0.1:40000
 YTDLP_REMOTE_COMPONENTS=false     # true = let yt-dlp fetch its YouTube solver script from GitHub
 MAX_VIDEO_MB=150
@@ -148,6 +150,19 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 1. Make sure the server clock is right (`timedatectl`; `NTP service: active`).
 2. Run only one copy of the bot with this token.
 3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
+
+**YouTube PO token provider (recommended, this is what makes video downloads work on a server):** YouTube only hands out video formats to "trusted" clients. A small local service, the PO-token provider, supplies the proof, and then no JavaScript runtime is needed. The bot uses it automatically when it finds it, and skips it silently when it doesn't. Three steps on the server:
+```
+# 1. the provider (needs Docker: sudo apt install -y docker.io)
+docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider
+
+# 2. the yt-dlp plugin, inside the bot's virtualenv (the same one yt-dlp lives in)
+/root/AnimeNewsBot/venv/bin/pip install -U bgutil-ytdlp-pot-provider
+
+# 3. a current yt-dlp (nightly builds carry the newest YouTube fixes)
+/root/AnimeNewsBot/venv/bin/pip install -U --pre "yt-dlp[default,curl-cffi]"
+```
+Then restart the bot and run `/testtrailer`: the "PO token" line must show the plugin ✅ and the provider ✅. If you already run another bot that has a provider, check `docker ps` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4416`: any answer (200 or 404) means it is up and the bot can reuse it. Use `YOUTUBE_POT_URL` in `config.env` if it listens elsewhere.
 
 **No video, and `/ytprobe` says "No supported JavaScript runtime" / "Signature solving failed":** YouTube needs a JavaScript runtime for most clients, and yt-dlp only accepts Node.js 22+, Deno 2.3+ or Bun 1.2.11+. The bot now tests every runtime it finds and only hands yt-dlp the ones that work; `/testtrailer` and `/ytprobe` show which ones were rejected and why. On Ubuntu/Debian:
 ```

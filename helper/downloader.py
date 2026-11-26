@@ -1,5 +1,6 @@
 """yt-dlp wrapper. Everything blocking runs in a worker thread."""
 import asyncio
+import importlib.metadata
 import importlib.util
 import json
 import logging
@@ -8,6 +9,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import yt_dlp
@@ -20,6 +23,8 @@ from config import (
     MAX_VIDEO_HEIGHT,
     MAX_VIDEO_MB,
     MAX_VIDEO_SECONDS,
+    YOUTUBE_POT_ENABLED,
+    YOUTUBE_POT_URL,
     YTDLP_PROXY,
     YTDLP_REMOTE_COMPONENTS,
 )
@@ -107,6 +112,35 @@ class _Collector:
             self.lines.append(m[:300])
 
 
+_POT_CACHE = {"at": 0.0, "ok": False}
+
+
+def pot_plugin_version():
+    """Version of the yt-dlp plugin that talks to the PO-token provider, or None when it isn't installed."""
+    try:
+        return importlib.metadata.version("bgutil-ytdlp-pot-provider")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def pot_reachable() -> bool:
+    """Is the PO-token provider answering? (any HTTP answer counts, even a 404; checked at most every 30 s)"""
+    if not YOUTUBE_POT_ENABLED:
+        return False
+    now = time.time()
+    if now - _POT_CACHE["at"] < 30:
+        return _POT_CACHE["ok"]
+    try:
+        urllib.request.urlopen(YOUTUBE_POT_URL, timeout=3).close()
+        ok = True
+    except urllib.error.HTTPError:
+        ok = True
+    except Exception:
+        ok = False
+    _POT_CACHE.update(at=now, ok=ok)
+    return ok
+
+
 def _load_cfg():
     try:
         with open(CFG_FILE, encoding="utf-8") as f:
@@ -144,9 +178,11 @@ def _apply_cfg(opts: dict, cfg) -> dict:
         if chosen:
             opts["js_runtimes"] = chosen
     if cfg.get("client"):
-        opts["extractor_args"] = {"youtube": {"player_client": [cfg["client"]]}}
+        opts.setdefault("extractor_args", {})["youtube"] = {"player_client": [cfg["client"]]}
     if cfg.get("cookies") is False:
         opts.pop("cookiefile", None)
+    if cfg.get("pot") is False:
+        opts.get("extractor_args", {}).pop("youtubepot", None)
     return opts
 
 
@@ -167,6 +203,10 @@ def _base_opts(collector=None, cfg=None) -> dict:
         opts["remote_components"] = ["ejs:github"]
     if os.path.exists(COOKIES_PATH):
         opts["cookiefile"] = COOKIES_PATH
+    if pot_reachable():
+        # same structure the PO-token plugin documents: dict -> dict -> list[str]
+        opts["extractor_args"] = {"youtubepot": {"providers": ["bgutilhttp"],
+                                                 "bgutilhttp": {"base_url": [YOUTUBE_POT_URL]}}}
     return _apply_cfg(opts, cfg)
 
 
@@ -182,8 +222,8 @@ def explain(error: str, formats_found=None) -> str:
     if "sign in to confirm" in e or "not a bot" in e:
         return "YouTube wants a logged-in session from this server. Send a cookies.txt and reply /setcookies."
     if "po token" in e or "po_token" in e:
-        return ("YouTube wants a 'PO token' for this client. See yt-dlp's PO Token guide "
-                "(the bgutil-ytdlp-pot-provider plugin automates it).")
+        return ("YouTube wants a 'PO token' for this client. Run the PO-token provider (README: 'YouTube PO token provider') "
+                "and install the plugin: pip install -U bgutil-ytdlp-pot-provider.")
     if "requested format is not available" in e or formats_found == 0:
         return ("YouTube returned no downloadable formats. Usually: no working JavaScript runtime (install Node.js 22+), "
                 "the EJS solver missing (pip install -U \"yt-dlp[default]\"), or a blocked server IP (add cookies / a proxy).")
@@ -288,13 +328,22 @@ def environment_info() -> dict:
         "remote_components": YTDLP_REMOTE_COMPONENTS,
         "cookies": os.path.exists(COOKIES_PATH),
         "cookie_info": cookie_summary(),
+        "pot": {"enabled": YOUTUBE_POT_ENABLED, "url": YOUTUBE_POT_URL, "plugin": pot_plugin_version(),
+                "reachable": pot_reachable()},
     }
 
 
 def runtime_warnings(env: dict) -> list:
     out = []
-    if not env["runtimes"]:
-        out.append("No JavaScript runtime found (need Node.js 22+, Deno 2.3+ or Bun 1.2.11+).")
+    pot = env.get("pot") or {}
+    pot_ready = bool(pot.get("enabled") and pot.get("plugin") and pot.get("reachable"))
+    if pot.get("enabled") and not pot.get("plugin"):
+        out.append("PO-token plugin not installed: pip install -U bgutil-ytdlp-pot-provider (in the bot's virtualenv).")
+    elif pot.get("enabled") and not pot.get("reachable"):
+        out.append(f"PO-token provider not reachable at {pot.get('url')}. Start it: docker run -d --name bgutil-provider "
+                   "-p 4416:4416 --init --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider")
+    if not env["runtimes"] and not pot_ready:
+        out.append("No JavaScript runtime found (need Node.js 22+, Deno 2.3+ or Bun 1.2.11+), and no PO-token provider either.")
     for issue in env.get("runtime_issues", []):
         out.append(f"JavaScript runtime problem, {issue}. yt-dlp ignores it, so YouTube returns no formats.")
     if not env["ejs"] and not env["remote_components"]:
@@ -417,6 +466,8 @@ def probe_configs() -> list:
     cfgs = [{"name": "default", "runtimes": None, "client": None, "cookies": True}]
     if len(runtimes) > 1:
         cfgs += [{"name": f"only {r}", "runtimes": [r], "client": None, "cookies": True} for r in runtimes]
+    if pot_reachable():
+        cfgs.append({"name": "default, without PO token", "runtimes": None, "client": None, "cookies": True, "pot": False})
     if os.path.exists(COOKIES_PATH):
         cfgs.append({"name": "default, without cookies", "runtimes": None, "client": None, "cookies": False})
     cfgs += [{"name": f"{c} client", "runtimes": None, "client": c, "cookies": True} for c in ("tv", "mweb", "web_safari")]

@@ -59,6 +59,10 @@ COOKIES_PATH = _env("COOKIES_PATH", "cookies.txt")
 # Optional proxy for YouTube only (yt-dlp), e.g. socks5://127.0.0.1:40000 or http://user:pass@host:port.
 # Useful when YouTube blocks your server's address.
 YTDLP_PROXY = _env("YTDLP_PROXY", "")
+# YouTube PO-token provider (bgutil-ytdlp-pot-provider): a small local service that makes YouTube hand out video
+# formats without a JavaScript runtime. Used automatically when it is reachable; silently skipped otherwise.
+YOUTUBE_POT_ENABLED = _bool("YOUTUBE_POT_ENABLED", True)
+YOUTUBE_POT_URL = _env("YOUTUBE_POT_URL", "http://127.0.0.1:4416")
 # Lets yt-dlp download its official YouTube challenge-solver script from GitHub when the yt-dlp-ejs package is
 # missing. Off by default (it runs downloaded JS); the safer fix is `pip install -U "yt-dlp[default]"`.
 YTDLP_REMOTE_COMPONENTS = _bool("YTDLP_REMOTE_COMPONENTS", False)
