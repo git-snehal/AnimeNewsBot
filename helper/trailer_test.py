@@ -50,7 +50,7 @@ def _env_lines(env: dict) -> list:
         if env["runtimes"] else "none found"
     lines = [
         "⚙️ <b>Environment</b>",
-        f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])}",
+        f"   yt-dlp {_esc(env['ytdlp'])} · solver (ejs) {_esc(env.get('ejs_version') or 'n/a')} · ffmpeg {_ok(env['ffmpeg'])}",
         _cookie_line(env.get("cookie_info") or {}),
         _pot_line(env.get("pot") or {}),
         f"   JS runtime: {_ok(env.get('runtime_ok'))} {_esc(rt)}",
@@ -120,6 +120,15 @@ async def run_trailer_test(http, arg=None, send=False):
     if first:
         lines.append("")
         d = await diagnose_video(first["yt"])
+        if not d["ok"]:
+            # the active setup failed: look for one that works, apply it, and check again
+            results = await probe_video(first["yt"], stop_on_success=True)
+            if results and results[-1]["ok"]:
+                cfg = results[-1]["cfg"]
+                set_active_cfg(None if cfg["name"] == "default" else cfg)
+                lines.append(f"🔧 The current setup got no formats, so I tried the others: <b>{_esc(cfg['name'])}</b> works. "
+                             "Applied and saved.")
+                d = await diagnose_video(first["yt"])
         if d["ok"]:
             mins, secs = divmod(d["duration"], 60)
             best = f" (up to {d['best_height']}p)" if d["best_height"] else ""

@@ -21,6 +21,7 @@ from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
 from helper.startup import start_with_retry
 from helper.state import state
+from helper.updater import maybe_auto_update, report as update_report, restart_process, run_update
 from helper.stats import daily_stats_loop, day_report, week_report
 from helper.parser import extract_youtube_url
 from helper.trailer_test import run_probe_report, run_trailer_test
@@ -124,6 +125,48 @@ async def feeds_cmd(client, message):
     await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def _restart_soon(client, delay: float = 3):
+    await asyncio.sleep(delay)
+    try:
+        await client.stop(block=False)
+    except Exception:
+        pass
+    restart_process()
+
+
+@app.on_message(admin_only & filters.command("updateytdlp"))
+async def updateytdlp_cmd(client, message):
+    status = await message.reply_text("⏳ Updating yt-dlp and the YouTube solver… this can take a couple of minutes.")
+    res = await run_update(pre=False if "stable" in message.command[1:] else None)
+    text = update_report(res)
+    if res["ok"] and res["changed"]:
+        text += "\n\n🔄 Restarting the bot to load the new version…"
+    elif res["ok"]:
+        text += "\n\nNothing new to install. If downloads still fail, run /ytprobe."
+    await status.edit_text(text, parse_mode=ParseMode.HTML)
+    if res["ok"] and res["changed"]:
+        await _restart_soon(client)
+
+
+async def ytdlp_update_loop(client):
+    """Once a day (and shortly after start): update yt-dlp; restart only when something actually changed."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            res = await maybe_auto_update()
+            if res and res["ok"] and res["changed"]:
+                for admin in ADMIN_IDS:
+                    with suppress(Exception):
+                        await client.send_message(admin, "🔄 yt-dlp was updated automatically:\n" + update_report(res)
+                                                  + "\nRestarting now.", parse_mode=ParseMode.HTML)
+                await _restart_soon(client, 2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("yt-dlp auto-update failed")
+        await asyncio.sleep(6 * 3600)
+
+
 @app.on_message(admin_only & filters.command("ytprobe"))
 async def ytprobe_cmd(client, message):
     arg = message.command[1] if len(message.command) > 1 else ""
@@ -218,6 +261,7 @@ async def main():
     tasks = [
         asyncio.create_task(broadcast_news_loop(app, db)),
         asyncio.create_task(daily_stats_loop(app, db)),
+        asyncio.create_task(ytdlp_update_loop(app)),
     ]
     try:
         await idle()

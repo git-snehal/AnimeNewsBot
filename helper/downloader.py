@@ -169,6 +169,13 @@ class _Collector:
 _POT_CACHE = {"at": 0.0, "ok": False}
 
 
+def _pkg_version(name: str):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def pot_plugin_version():
     """Version of the yt-dlp plugin that talks to the PO-token provider, or None when it isn't installed."""
     try:
@@ -235,6 +242,8 @@ def _apply_cfg(opts: dict, cfg) -> dict:
         opts.setdefault("extractor_args", {})["youtube"] = {"player_client": [cfg["client"]]}
     if cfg.get("cookies") is False:
         opts.pop("cookiefile", None)
+    if cfg.get("remote"):
+        opts["remote_components"] = [cfg["remote"]]
     if cfg.get("pot") is False:
         opts.get("extractor_args", {}).pop("youtubepot-bgutilhttp", None)
     return opts
@@ -385,6 +394,18 @@ def cookie_summary(path: str = None) -> dict:
             "days": int((soonest - now) / 86400) if soonest else None}
 
 
+def ytdlp_age_days():
+    """How old is this yt-dlp build? (version looks like 2026.10.21 or 2026.10.21.202512)"""
+    m = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", yt_dlp.version.__version__)
+    if not m:
+        return None
+    try:
+        built = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - built).days
+
+
 def environment_info() -> dict:
     runtimes, issues, usable = {}, [], False
     for name, cfg in _found_runtimes().items():
@@ -395,6 +416,8 @@ def environment_info() -> dict:
             issues.append(f"{name}: {st['reason']}")
     return {
         "ytdlp": yt_dlp.version.__version__,
+        "ytdlp_age_days": ytdlp_age_days(),
+        "ejs_version": _pkg_version("yt-dlp-ejs"),
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "runtimes": runtimes,
         "runtime_issues": issues,
@@ -411,6 +434,10 @@ def environment_info() -> dict:
 
 def runtime_warnings(env: dict) -> list:
     out = []
+    age = env.get("ytdlp_age_days")
+    if age is not None and age > 14:
+        out.append(f"yt-dlp is {age} days old. YouTube changes its player weekly, so old versions stop getting formats. "
+                   "Run /updateytdlp (or set YTDLP_AUTO_UPDATE=true).")
     pot = env.get("pot") or {}
     pot_ready = bool(pot.get("enabled") and pot.get("plugin") and pot.get("reachable"))
     if pot.get("enabled") and not pot.get("plugin"):
@@ -543,6 +570,10 @@ def probe_configs() -> list:
     cfgs = [{"name": "default", "runtimes": None, "client": None, "cookies": True}]
     if len(runtimes) > 1:
         cfgs += [{"name": f"only {r}", "runtimes": [r], "client": None, "cookies": True} for r in runtimes]
+    if _ejs_installed() and not _remote_components():
+        # the newest solver script straight from yt-dlp's GitHub: fixes "n challenge solving failed" after a player change
+        cfgs.append({"name": "default + newest solver script (GitHub)", "runtimes": None, "client": None, "cookies": True,
+                     "remote": "ejs:github"})
     if pot_reachable():
         cfgs.append({"name": "default, without PO token", "runtimes": None, "client": None, "cookies": True, "pot": False})
     if os.path.exists(COOKIES_PATH):

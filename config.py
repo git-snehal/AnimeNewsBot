@@ -61,6 +61,9 @@ COOKIES_PATH = _env("COOKIES_PATH", "cookies.txt")
 YTDLP_PROXY = _env("YTDLP_PROXY", "")
 # YouTube PO-token provider (bgutil-ytdlp-pot-provider): a small local service that makes YouTube hand out video
 # formats without a JavaScript runtime. Used automatically when it is reachable; silently skipped otherwise.
+# YouTube changes its player almost weekly and old yt-dlp / solver versions stop getting formats. Keep them fresh:
+YTDLP_AUTO_UPDATE = _bool("YTDLP_AUTO_UPDATE", True)   # check once a day, restart the bot only when something changed
+YTDLP_UPDATE_PRE = _bool("YTDLP_UPDATE_PRE", True)     # include nightly builds (they carry the newest YouTube fixes)
 YOUTUBE_POT_ENABLED = _bool("YOUTUBE_POT_ENABLED", True)
 YOUTUBE_POT_URL = _env("YOUTUBE_POT_URL", "http://127.0.0.1:4416")
 # Where yt-dlp gets its YouTube challenge-solver script: auto = from the yt-dlp-ejs package (in requirements.txt),

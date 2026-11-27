@@ -91,6 +91,8 @@ PAGE_VIDEO_FALLBACK=true          # look for the video on the article page if th
 YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no video: strict YouTube search
 YOUTUBE_POT_ENABLED=true           # use the PO-token provider when it is running
 YOUTUBE_POT_URL=http://127.0.0.1:4416
+YTDLP_AUTO_UPDATE=true             # once a day: update yt-dlp + solver, restart only if something changed
+YTDLP_UPDATE_PRE=true              # include nightly builds
 YTDLP_PROXY=                      # optional proxy for YouTube only, e.g. socks5://127.0.0.1:40000
 YTDLP_REMOTE_COMPONENTS=auto           # auto = use the yt-dlp-ejs package | off | ejs:github | ejs:npm
 YTDLP_JS_RUNTIME_PATH=            # only if the bot can't find deno/node, e.g. /root/.deno/bin/deno
@@ -124,6 +126,7 @@ The "/" menu is hardcoded in `helper/commands.py` and registered with Telegram o
 | `/status` | Running or paused, last check, feed health, cookies, all-time count |
 | `/fetchnow` | Check the feeds immediately |
 | `/feeds` | Test every RSS feed right now: which ones work, which are blocked |
+| `/updateytdlp` | Updates yt-dlp, its YouTube solver and the PO-token plugin (nightly builds), then restarts the bot if anything changed. `/updateytdlp stable` skips nightlies |
 | `/ytprobe` | Tries every YouTube setup (JS runtime, player client, with/without cookies) on one video, shows which work, and makes downloads use the first one that does. `/ytprobe [YouTube link]` |
 | `/testtrailer` | Test the trailer pipeline: `/testtrailer` (newest trailer articles), `/testtrailer <article or YouTube link>`, add `send` to also download the video and get it here |
 | `/pause` / `/resume` | Stop / restart posting (nothing is skipped, new articles post after resume) |
@@ -164,6 +167,8 @@ docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stoppe
 /root/AnimeNewsBot/venv/bin/pip install -U --pre "yt-dlp[default,curl-cffi]"
 ```
 Then restart the bot and run `/testtrailer`: the "PO token" line must show the plugin ✅ and the provider ✅. If you already run another bot that has a provider, check `docker ps` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4416`: any answer (200 or 404) means it is up and the bot can reuse it. Use `YOUTUBE_POT_URL` in `config.env` if it listens elsewhere.
+
+**`n challenge solving failed` / `Only images are available` / `addOnDisposeCallback is not a function`, although Deno works:** the solver script is older than YouTube's current player. YouTube changes its player almost every week, and an old yt-dlp (or `yt-dlp-ejs`) stops getting video formats. That is the number one reason a downloader that worked last month fails today. Fix: `/updateytdlp` (or `pip install -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs` in the virtualenv, then restart). The bot also does this by itself once a day (`YTDLP_AUTO_UPDATE`, on by default) and restarts only when something actually changed. `/testtrailer` warns when yt-dlp is more than 14 days old, and `/ytprobe` also tries the newest solver script straight from GitHub.
 
 **No video, and `/testtrailer` says "JS runtime: ❌ none found" / "No supported JavaScript runtime":** YouTube needs a JavaScript runtime to unlock video formats. The easy, reliable way (the same one the other working bots use) is the `deno` pip package, which ships the Deno binary inside your virtualenv:
 ```
