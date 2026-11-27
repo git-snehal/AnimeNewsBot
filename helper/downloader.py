@@ -1,5 +1,6 @@
 """yt-dlp wrapper. Everything blocking runs in a worker thread."""
 import asyncio
+import contextlib
 import importlib.metadata
 import importlib.util
 import json
@@ -8,10 +9,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import yt_dlp
 from yt_dlp import YoutubeDL
@@ -25,6 +29,7 @@ from config import (
     MAX_VIDEO_SECONDS,
     YOUTUBE_POT_ENABLED,
     YOUTUBE_POT_URL,
+    YTDLP_JS_RUNTIME_PATH,
     YTDLP_PROXY,
     YTDLP_REMOTE_COMPONENTS,
 )
@@ -75,13 +80,62 @@ def runtime_status(name: str, path: str) -> dict:
     return _RT_CACHE[key]
 
 
+_RT_BINARIES = {"deno": ("deno",), "node": ("node", "nodejs"), "bun": ("bun",), "quickjs": ("qjs", "quickjs")}
+
+
+def _runtime_dirs() -> list:
+    """Folders worth looking in. A bot started by systemd/pm2/docker often has a shorter PATH than your shell, so look
+    next to the Python executable first: `pip install deno` puts the binary there (inside the virtualenv)."""
+    home = Path.home()
+    return [Path(sys.executable).parent, home / ".deno" / "bin", home / ".bun" / "bin", Path("/usr/local/bin"),
+            Path("/usr/bin"), Path("/opt/homebrew/bin"), Path("/root/.deno/bin")]
+
+
+def _runtime_candidates(name: str) -> list:
+    names = _RT_BINARIES[name]
+    out = []
+    if YTDLP_JS_RUNTIME_PATH:
+        p = Path(YTDLP_JS_RUNTIME_PATH).expanduser()
+        if p.exists() and p.name.lower().replace(".exe", "") in names:
+            out.append(str(p))
+    dirs = _runtime_dirs()
+    for d in dirs[:1]:                                  # the virtualenv's own folder wins
+        out += [str(d / b) for b in names if (d / b).is_file() and os.access(d / b, os.X_OK)]
+    out += [w for w in (shutil.which(b) for b in names) if w]
+    for d in dirs[1:]:
+        out += [str(d / b) for b in names if (d / b).is_file() and os.access(d / b, os.X_OK)]
+    seen, unique = set(), []
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
 def _found_runtimes() -> dict:
+    """{name: {"path": ...}}: for each runtime, the first copy that really works (else the first one found)."""
     found = {}
-    for name, binary in (("deno", "deno"), ("node", "node"), ("bun", "bun"), ("quickjs", "qjs")):
-        path = shutil.which(binary)
-        if path:
-            found[name] = {"path": path}
+    for name in _RT_BINARIES:
+        candidates = _runtime_candidates(name)
+        if not candidates:
+            continue
+        pick = next((c for c in candidates if name not in _MIN_VERSION or runtime_status(name, c)["ok"]), candidates[0])
+        found[name] = {"path": pick}
     return found
+
+
+def _ejs_installed() -> bool:
+    return importlib.util.find_spec("yt_dlp_ejs") is not None
+
+
+def _remote_components() -> list:
+    mode = (YTDLP_REMOTE_COMPONENTS or "").strip().lower()
+    if mode in ("off", "none", "false", "0", ""):
+        return []
+    if mode in ("auto", "true", "1"):
+        # the solver script normally ships in the yt-dlp-ejs package; fetch it from yt-dlp's GitHub only if missing
+        return [] if _ejs_installed() else ["ejs:github"]
+    return [part.strip() for part in mode.split(",") if part.strip()]
 
 
 def js_runtimes() -> dict:
@@ -182,11 +236,11 @@ def _apply_cfg(opts: dict, cfg) -> dict:
     if cfg.get("cookies") is False:
         opts.pop("cookiefile", None)
     if cfg.get("pot") is False:
-        opts.get("extractor_args", {}).pop("youtubepot", None)
+        opts.get("extractor_args", {}).pop("youtubepot-bgutilhttp", None)
     return opts
 
 
-def _base_opts(collector=None, cfg=None) -> dict:
+def _base_opts(collector=None, cfg=None, cookiefile=None) -> dict:
     opts = {
         "quiet": True,
         "noprogress": True,
@@ -199,23 +253,44 @@ def _base_opts(collector=None, cfg=None) -> dict:
         opts["logger"] = collector
     if YTDLP_PROXY:
         opts["proxy"] = YTDLP_PROXY
-    if YTDLP_REMOTE_COMPONENTS:
-        opts["remote_components"] = ["ejs:github"]
-    if os.path.exists(COOKIES_PATH):
-        opts["cookiefile"] = COOKIES_PATH
+    remote = _remote_components()
+    if remote:
+        opts["remote_components"] = remote
+    cookie = cookiefile or (COOKIES_PATH if os.path.exists(COOKIES_PATH) else None)
+    if cookie:
+        opts["cookiefile"] = cookie
     if pot_reachable():
-        # same structure the PO-token plugin documents: dict -> dict -> list[str]
-        opts["extractor_args"] = {"youtubepot": {"providers": ["bgutilhttp"],
-                                                 "bgutilhttp": {"base_url": [YOUTUBE_POT_URL]}}}
+        # the plugin's documented form (same as `--extractor-args youtubepot-bgutilhttp:base_url=...`)
+        opts.setdefault("extractor_args", {})["youtubepot-bgutilhttp"] = {"base_url": [YOUTUBE_POT_URL]}
     return _apply_cfg(opts, cfg)
+
+
+@contextlib.contextmanager
+def _cookie_copy():
+    """yt-dlp REWRITES the cookie file it is given (that is why your cookie count kept changing, 24 -> 22).
+    Work on a throw-away copy so the original, and any parallel job, stays untouched."""
+    if not os.path.exists(COOKIES_PATH):
+        yield None
+        return
+    fd, tmp = tempfile.mkstemp(prefix="ytcookies_", suffix=".txt")
+    os.close(fd)
+    try:
+        shutil.copyfile(COOKIES_PATH, tmp)
+        yield tmp
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def explain(error: str, formats_found=None) -> str:
     """Turn a yt-dlp error into something actionable."""
     e = (error or "").lower()
     if "no supported javascript runtime" in e or "signature solving failed" in e or "supported java" in e:
-        return ("yt-dlp has no WORKING JavaScript runtime, so it can't solve YouTube's challenge. Install Node.js 22+ "
-                "(or Deno 2.3+) and restart the bot. This usually also explains the 'sign in to confirm you're not a bot' message.")
+        return ("yt-dlp has no WORKING JavaScript runtime, so it can't solve YouTube's challenge. Run "
+                "`pip install -U deno yt-dlp-ejs yt-dlp` inside the bot's virtualenv (they're in requirements.txt) and restart. "
+                "This usually also explains the 'sign in to confirm you're not a bot' message.")
     if "challenge" in e and ("fail" in e or "solv" in e):
         return ("yt-dlp could not run its YouTube challenge solver. Check `deno --version` (needs 2.3+), "
                 "or Node 22+, and that yt-dlp-ejs is installed.")
@@ -225,7 +300,7 @@ def explain(error: str, formats_found=None) -> str:
         return ("YouTube wants a 'PO token' for this client. Run the PO-token provider (README: 'YouTube PO token provider') "
                 "and install the plugin: pip install -U bgutil-ytdlp-pot-provider.")
     if "requested format is not available" in e or formats_found == 0:
-        return ("YouTube returned no downloadable formats. Usually: no working JavaScript runtime (install Node.js 22+), "
+        return ("YouTube returned no downloadable formats. Usually: no working JavaScript runtime (pip install -U deno), "
                 "the EJS solver missing (pip install -U \"yt-dlp[default]\"), or a blocked server IP (add cookies / a proxy).")
     if "private video" in e or "unavailable" in e:
         return "The video is private, removed or region-locked."
@@ -234,11 +309,11 @@ def explain(error: str, formats_found=None) -> str:
     return ""
 
 
-def _download_sync(url: str, cfg=None):
+def _download_sync_impl(url: str, cfg=None, cookiefile=None):
     """Returns a dict, or None when the duration/live filter rejected the video. Raises on real errors."""
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     notes = _Collector()
-    opts = _base_opts(notes, cfg) | {
+    opts = _base_opts(notes, cfg, cookiefile) | {
         "format": _format_selector(),
         "merge_output_format": "mp4",
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
@@ -325,7 +400,8 @@ def environment_info() -> dict:
         "runtime_issues": issues,
         "runtime_ok": usable,
         "ejs": importlib.util.find_spec("yt_dlp_ejs") is not None,
-        "remote_components": YTDLP_REMOTE_COMPONENTS,
+        "remote_components": bool(_remote_components()),
+        "runtime_paths": {n: c["path"] for n, c in _found_runtimes().items()},
         "cookies": os.path.exists(COOKIES_PATH),
         "cookie_info": cookie_summary(),
         "pot": {"enabled": YOUTUBE_POT_ENABLED, "url": YOUTUBE_POT_URL, "plugin": pot_plugin_version(),
@@ -343,7 +419,8 @@ def runtime_warnings(env: dict) -> list:
         out.append(f"PO-token provider not reachable at {pot.get('url')}. Start it: docker run -d --name bgutil-provider "
                    "-p 4416:4416 --init --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider")
     if not env["runtimes"] and not pot_ready:
-        out.append("No JavaScript runtime found (need Node.js 22+, Deno 2.3+ or Bun 1.2.11+), and no PO-token provider either.")
+        out.append("No JavaScript runtime found. Fix: pip install -U deno yt-dlp-ejs (inside the bot's virtualenv; both are in "
+                   "requirements.txt), then restart the bot.")
     for issue in env.get("runtime_issues", []):
         out.append(f"JavaScript runtime problem, {issue}. yt-dlp ignores it, so YouTube returns no formats.")
     if not env["ejs"] and not env["remote_components"]:
@@ -353,10 +430,10 @@ def runtime_warnings(env: dict) -> list:
     return out
 
 
-def _diagnose_sync(url: str, cfg=None) -> dict:
+def _diagnose_sync_impl(url: str, cfg=None, cookiefile=None) -> dict:
     """Metadata-only check: can yt-dlp see real, downloadable formats for this video?"""
     notes = _Collector()
-    opts = _base_opts(notes, cfg) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
+    opts = _base_opts(notes, cfg, cookiefile) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -395,7 +472,7 @@ def season_numbers(text: str) -> set:
     return out
 
 
-def _search_sync(show: str, kind_name: str, article_title: str = "", published=None):
+def _search_sync_impl(show: str, kind_name: str, article_title: str = "", published=None, cookiefile=None):
     """Last-resort YouTube search. Deliberately strict: no video beats the wrong video.
 
     A result is only accepted when its title contains every word of the show name, it is not a reaction/review/etc.,
@@ -408,7 +485,7 @@ def _search_sync(show: str, kind_name: str, article_title: str = "", published=N
     want = season_numbers(article_title)
     max_len = min(MAX_VIDEO_SECONDS, 600)
 
-    with YoutubeDL(_base_opts() | {"extract_flat": True}) as ydl:
+    with YoutubeDL(_base_opts(cookiefile=cookiefile) | {"extract_flat": True}) as ydl:
         res = ydl.extract_info(f"ytsearch8:{show} {kind_name} anime", download=False)
 
     cands, why, entries = [], {}, (res or {}).get("entries") or []
@@ -438,7 +515,7 @@ def _search_sync(show: str, kind_name: str, article_title: str = "", published=N
     ref = (published or datetime.now(timezone.utc)).date()
     for cand in cands[:3]:
         try:
-            opts = _base_opts() | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
+            opts = _base_opts(cookiefile=cookiefile) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": True}
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(cand["url"], download=False)
         except Exception:
@@ -484,6 +561,21 @@ def _probe_sync(url: str, stop_on_success: bool = False) -> list:
         if d["ok"] and stop_on_success:
             break
     return out
+
+
+def _download_sync(url: str, cfg=None):
+    with _cookie_copy() as ck:
+        return _download_sync_impl(url, cfg, ck)
+
+
+def _diagnose_sync(url: str, cfg=None) -> dict:
+    with _cookie_copy() as ck:
+        return _diagnose_sync_impl(url, cfg, ck)
+
+
+def _search_sync(show: str, kind_name: str, article_title: str = "", published=None):
+    with _cookie_copy() as ck:
+        return _search_sync_impl(show, kind_name, article_title, published, ck)
 
 
 async def probe_video(url: str, stop_on_success: bool = False) -> list:

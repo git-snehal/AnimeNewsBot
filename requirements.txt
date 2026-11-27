@@ -2,9 +2,13 @@ pyrofork>=2.3.60
 tgcrypto
 feedparser
 httpx
-yt-dlp[default,curl-cffi]
-bgutil-ytdlp-pot-provider
+beautifulsoup4
 deep-translator
 python-dotenv
-beautifulsoup4
 tzdata
+
+# --- YouTube trailer downloads (same stack as the working Nami-San / tg-ytdlp bots) ---
+yt-dlp[default,curl-cffi]     # [default] pulls the solver script, [curl-cffi] = browser impersonation
+yt-dlp-ejs                    # YouTube challenge-solver script (required for YouTube)
+deno                          # JavaScript runtime for the solver: the pip package ships the binary
+bgutil-ytdlp-pot-provider     # optional PO-token plugin; only used when the provider server is running (README)

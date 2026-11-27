@@ -45,7 +45,9 @@ def _pot_line(p: dict) -> str:
 
 
 def _env_lines(env: dict) -> list:
-    rt = ", ".join(f"{n} {v}" for n, v in env["runtimes"].items()) if env["runtimes"] else "none found"
+    paths = env.get("runtime_paths") or {}
+    rt = ", ".join(f"{n} {v} ({paths[n][-40:]})" if n in paths else f"{n} {v}" for n, v in env["runtimes"].items()) \
+        if env["runtimes"] else "none found"
     lines = [
         "⚙️ <b>Environment</b>",
         f"   yt-dlp {_esc(env['ytdlp'])} · ffmpeg {_ok(env['ffmpeg'])}",
@@ -173,15 +175,15 @@ async def run_probe_report(url: str) -> str:
         lines.append(f"✅ Downloads will use: <b>{_esc(cfg['name'])}</b> (saved, survives restarts). Try <code>/testtrailer send</code>.")
         if js_problem and cfg["name"] != "default":
             lines.append("ℹ️ The default setup (with your cookies) fails because yt-dlp has no WORKING JavaScript runtime. "
-                         "Downloads run without cookies for now, which works. Installing Node.js 22+ and restarting the bot "
-                         "lets cookies work too.")
+                         "Downloads run without cookies for now, which works. Run `pip install -U deno yt-dlp-ejs` in the bot's virtualenv and restart "
+                         "so cookies work too.")
     else:
         tips = []
         pot = env.get("pot") or {}
         if not (pot.get("plugin") and pot.get("reachable")):
             tips.append("set up the PO-token provider like your other bot does (README: 'YouTube PO token provider')")
         if not env.get("runtime_ok") or js_problem:
-            tips.append("install Node.js 22+ (yt-dlp has no working JavaScript runtime)")
+            tips.append("run `pip install -U deno yt-dlp-ejs` in the bot's virtualenv and restart (no working JavaScript runtime)")
         c = env.get("cookie_info") or {}
         if not c.get("logged_in"):
             tips.append("send fresh cookies exported while logged in (/setcookies)")

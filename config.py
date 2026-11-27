@@ -63,9 +63,12 @@ YTDLP_PROXY = _env("YTDLP_PROXY", "")
 # formats without a JavaScript runtime. Used automatically when it is reachable; silently skipped otherwise.
 YOUTUBE_POT_ENABLED = _bool("YOUTUBE_POT_ENABLED", True)
 YOUTUBE_POT_URL = _env("YOUTUBE_POT_URL", "http://127.0.0.1:4416")
-# Lets yt-dlp download its official YouTube challenge-solver script from GitHub when the yt-dlp-ejs package is
-# missing. Off by default (it runs downloaded JS); the safer fix is `pip install -U "yt-dlp[default]"`.
-YTDLP_REMOTE_COMPONENTS = _bool("YTDLP_REMOTE_COMPONENTS", False)
+# Where yt-dlp gets its YouTube challenge-solver script: auto = from the yt-dlp-ejs package (in requirements.txt),
+# falling back to yt-dlp's own GitHub only if that package is missing | off | ejs:github | ejs:npm
+YTDLP_REMOTE_COMPONENTS = _env("YTDLP_REMOTE_COMPONENTS", "auto")
+# Full path to a JavaScript runtime (deno / node / bun) if the bot can't find it by itself. Normally not needed:
+# `pip install deno` (in requirements.txt) puts it next to Python, where the bot looks first.
+YTDLP_JS_RUNTIME_PATH = _env("YTDLP_JS_RUNTIME_PATH", "")
 DOWNLOAD_DIR = "downloads"
 
 # ---- Feeds (verify these URLs still work) ----

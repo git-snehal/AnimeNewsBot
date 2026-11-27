@@ -60,7 +60,7 @@
 ## ⚙️ Setup
 
 1. Install **ffmpeg** (needed to merge video and audio). Recent `yt-dlp` versions also want a JavaScript runtime such as Deno for YouTube.
-2. `pip install -r requirements.txt`
+2. `pip install -r requirements.txt` (this also installs `deno`, the JavaScript runtime that YouTube downloads need, and `yt-dlp-ejs`)
 3. Copy `config.env.example` to `config.env` and fill it in (see below).
 4. Add the bot as an **admin of your channel** with permission to post.
 5. `python preview.py` shows sample posts offline. `python check_feeds.py` shows what your feeds really contain. `python bot.py` runs the bot.
@@ -92,7 +92,8 @@ YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no
 YOUTUBE_POT_ENABLED=true           # use the PO-token provider when it is running
 YOUTUBE_POT_URL=http://127.0.0.1:4416
 YTDLP_PROXY=                      # optional proxy for YouTube only, e.g. socks5://127.0.0.1:40000
-YTDLP_REMOTE_COMPONENTS=false     # true = let yt-dlp fetch its YouTube solver script from GitHub
+YTDLP_REMOTE_COMPONENTS=auto           # auto = use the yt-dlp-ejs package | off | ejs:github | ejs:npm
+YTDLP_JS_RUNTIME_PATH=            # only if the bot can't find deno/node, e.g. /root/.deno/bin/deno
 MAX_VIDEO_MB=150
 MAX_VIDEO_SECONDS=600
 MAX_VIDEO_HEIGHT=720
@@ -151,12 +152,12 @@ If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot
 2. Run only one copy of the bot with this token.
 3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
 
-**YouTube PO token provider (recommended, this is what makes video downloads work on a server):** YouTube only hands out video formats to "trusted" clients. A small local service, the PO-token provider, supplies the proof, and then no JavaScript runtime is needed. The bot uses it automatically when it finds it, and skips it silently when it doesn't. Three steps on the server:
+**YouTube PO token provider (optional extra):** with a working JS runtime (above) it is usually not needed. It is a small local service that supplies YouTube's "proof of trust" token, and helps when YouTube still refuses a server's address. The bot uses it automatically when it finds it, and skips it silently when it doesn't. Three steps on the server:
 ```
 # 1. the provider (needs Docker: sudo apt install -y docker.io)
 docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider
 
-# 2. the yt-dlp plugin, inside the bot's virtualenv (the same one yt-dlp lives in)
+# 2. the yt-dlp plugin (already in requirements.txt; install it in the bot's virtualenv)
 /root/AnimeNewsBot/venv/bin/pip install -U bgutil-ytdlp-pot-provider
 
 # 3. a current yt-dlp (nightly builds carry the newest YouTube fixes)
@@ -164,13 +165,13 @@ docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stoppe
 ```
 Then restart the bot and run `/testtrailer`: the "PO token" line must show the plugin ✅ and the provider ✅. If you already run another bot that has a provider, check `docker ps` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4416`: any answer (200 or 404) means it is up and the bot can reuse it. Use `YOUTUBE_POT_URL` in `config.env` if it listens elsewhere.
 
-**No video, and `/ytprobe` says "No supported JavaScript runtime" / "Signature solving failed":** YouTube needs a JavaScript runtime for most clients, and yt-dlp only accepts Node.js 22+, Deno 2.3+ or Bun 1.2.11+. The bot now tests every runtime it finds and only hands yt-dlp the ones that work; `/testtrailer` and `/ytprobe` show which ones were rejected and why. On Ubuntu/Debian:
+**No video, and `/testtrailer` says "JS runtime: ❌ none found" / "No supported JavaScript runtime":** YouTube needs a JavaScript runtime to unlock video formats. The easy, reliable way (the same one the other working bots use) is the `deno` pip package, which ships the Deno binary inside your virtualenv:
 ```
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-node --version      # must print v22 or higher
+/root/AnimeNewsBot/venv/bin/pip install -U -r requirements.txt     # installs deno, yt-dlp-ejs, yt-dlp, the PO-token plugin...
 ```
-then restart the bot. Until a runtime works, the bot downloads without cookies (that setup is remembered across restarts), which is enough for most trailers.
+Restart the bot. It looks for runtimes next to the Python executable first (so it works even when systemd/pm2 gives the bot a short `PATH`), checks that each one runs and is new enough, and hands yt-dlp the full path. `/testtrailer` shows which runtime was found and where. If yours lives somewhere unusual, set `YTDLP_JS_RUNTIME_PATH=/full/path/to/deno` in `config.env`.
+
+The bot also works on a *copy* of `cookies.txt` for every download, because yt-dlp rewrites the cookie file it is given.
 
 **Videos work on one machine but not on another (for example Colab works, your VPS doesn't):** YouTube treats cloud / datacenter addresses as bots far more often than home or Google-owned ones. The bot copes in three ways:
 1. When a download is blocked, it automatically tries other yt-dlp setups (each JS runtime on its own, other player clients, with and without cookies), remembers the first one that works, and retries. It does this at most once every 30 minutes.
