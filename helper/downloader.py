@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import importlib.metadata
+import platform
 import importlib.util
 import json
 import logging
@@ -417,6 +418,8 @@ def environment_info() -> dict:
     return {
         "ytdlp": yt_dlp.version.__version__,
         "ytdlp_age_days": ytdlp_age_days(),
+        "python": platform.python_version(),
+        "python_ok": sys.version_info >= (3, 11),
         "ejs_version": _pkg_version("yt-dlp-ejs"),
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "runtimes": runtimes,
@@ -434,6 +437,9 @@ def environment_info() -> dict:
 
 def runtime_warnings(env: dict) -> list:
     out = []
+    if not env.get("python_ok", True):
+        out.append(f"Python {env.get('python')} is deprecated by yt-dlp and the newest yt-dlp / solver need 3.11+. "
+                   "Use Python 3.11 or newer (3.12 recommended) for the bot's virtualenv.")
     age = env.get("ytdlp_age_days")
     if age is not None and age > 14:
         out.append(f"yt-dlp is {age} days old. YouTube changes its player weekly, so old versions stop getting formats. "
@@ -485,7 +491,12 @@ def _diagnose_sync_impl(url: str, cfg=None, cookiefile=None) -> dict:
 
 _ORDINALS = {"second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6}
 _SEASON_NUM = re.compile(r"season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s+season|\bs(\d{1,2})\b|\b(second|third|fourth|fifth|sixth)\s+season", re.I)
-_BAD_TITLE = re.compile(r"\b(reaction|react|reacts|review|explained|breakdown|analysis|amv|gameplay|compilation|recap)\b")
+_BAD_TITLE = re.compile(
+    r"\b(reaction|react|reacts|review|explained|breakdown|analysis|amv|gameplay|compilation|recap"
+    r"|episodes?\s*\d+|ep\s*\d+|upcoming episodes|next episode|full episode)\b")
+_FAN_MADE = re.compile(r"\b(fan\s*made|fanmade|unofficial|concept|fan\s*edit|parody|remake)\b")
+# a trailer search must return a trailer / teaser / PV, not an episode preview or a clip
+_VIDEO_KIND = re.compile(r"\b(trailer|teaser|pvs?|promo|promotional|announcement|commercial|cm|key visual|official video)\b")
 SEARCH_MAX_AGE_DAYS = 21
 
 
@@ -528,7 +539,13 @@ def _search_sync_impl(show: str, kind_name: str, article_title: str = "", publis
             reject("title lacks the show name")
             continue
         if _BAD_TITLE.search(norm):
-            reject("reaction/review/etc.")
+            reject("reaction/review/episode preview")
+            continue
+        if _FAN_MADE.search(norm):
+            reject("fan-made")
+            continue
+        if not _VIDEO_KIND.search(norm):
+            reject("not a trailer/teaser/PV")
             continue
         if dur and (dur > max_len or dur < 5):
             reject("wrong length")
@@ -537,7 +554,10 @@ def _search_sync_impl(show: str, kind_name: str, article_title: str = "", publis
         if (want and got and not (want & got)) or (not want and any(n >= 2 for n in got)):
             reject("different season")  # e.g. the article is about season 2, this is a season 1 video
             continue
-        cands.append({"url": f"https://www.youtube.com/watch?v={e['id']}", "title": title})
+        cands.append({"url": f"https://www.youtube.com/watch?v={e['id']}", "title": title,
+                      "score": 2 * bool(re.search(r"\bofficial\b", norm))})
+
+    cands.sort(key=lambda c: -c["score"])   # an "Official ..." upload first; otherwise YouTube's own order
 
     ref = (published or datetime.now(timezone.utc)).date()
     for cand in cands[:3]:

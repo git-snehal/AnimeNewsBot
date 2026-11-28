@@ -50,7 +50,7 @@ def _env_lines(env: dict) -> list:
         if env["runtimes"] else "none found"
     lines = [
         "⚙️ <b>Environment</b>",
-        f"   yt-dlp {_esc(env['ytdlp'])} · solver (ejs) {_esc(env.get('ejs_version') or 'n/a')} · ffmpeg {_ok(env['ffmpeg'])}",
+        f"   yt-dlp {_esc(env['ytdlp'])} · solver (ejs) {_esc(env.get('ejs_version') or 'n/a')} · ffmpeg {_ok(env['ffmpeg'])} · Python {_esc(env.get('python', '?'))}",
         _cookie_line(env.get("cookie_info") or {}),
         _pot_line(env.get("pot") or {}),
         f"   JS runtime: {_ok(env.get('runtime_ok'))} {_esc(rt)}",

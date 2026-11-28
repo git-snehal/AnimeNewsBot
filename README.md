@@ -47,7 +47,7 @@
 
 ## 🧰 Tech Stack
 
-* **Language:** Python 3.10+ (3.10 to 3.12 recommended)
+* **Language:** Python 3.11 or newer (3.12 recommended). yt-dlp has deprecated 3.10, and the newest yt-dlp / YouTube solver need 3.11+
 * **Telegram Framework:** Pyrofork (async MTProto client, Pyrogram-compatible)
 * **Feeds:** `feedparser` + `httpx`
 * **Page parsing:** `beautifulsoup4`
@@ -167,6 +167,10 @@ docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stoppe
 /root/AnimeNewsBot/venv/bin/pip install -U --pre "yt-dlp[default,curl-cffi]"
 ```
 Then restart the bot and run `/testtrailer`: the "PO token" line must show the plugin ✅ and the provider ✅. If you already run another bot that has a provider, check `docker ps` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4416`: any answer (200 or 404) means it is up and the bot can reuse it. Use `YOUTUBE_POT_URL` in `config.env` if it listens elsewhere.
+
+**Crunchyroll article pages answer 403 from your server:** that only affects the extra page lookup (picture / video link); the Crunchyroll *feed* works and posts keep the feed's image. The bot tries a Chrome-impersonating client (`curl_cffi`) first, and when the site still refuses, remembers that for 6 hours, logs one warning and stops retrying. YouTube trailers for those posts are then found through the other outlets or the YouTube search.
+
+**The YouTube search picked a wrong video:** it now only accepts titles that contain every word of the show name AND look like a trailer / teaser / PV (episode previews, clips, reactions and fan-made videos are rejected), within 3 weeks of the article, and prefers "Official" uploads. `/testtrailer` shows which video it matched so you can check it.
 
 **`n challenge solving failed` / `Only images are available` / `addOnDisposeCallback is not a function`, although Deno works:** the solver script is older than YouTube's current player. YouTube changes its player almost every week, and an old yt-dlp (or `yt-dlp-ejs`) stops getting video formats. That is the number one reason a downloader that worked last month fails today. Fix: `/updateytdlp` (or `pip install -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs` in the virtualenv, then restart). The bot also does this by itself once a day (`YTDLP_AUTO_UPDATE`, on by default) and restarts only when something actually changed. `/testtrailer` warns when yt-dlp is more than 14 days old, and `/ytprobe` also tries the newest solver script straight from GitHub.
 

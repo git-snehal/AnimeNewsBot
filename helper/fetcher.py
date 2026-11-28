@@ -34,31 +34,86 @@ PAGE_PROFILES = [
      "Accept-Language": "en-US,en;q=0.9"},
     {"User-Agent": "Feedly/1.0 (+http://www.feedly.com/fetcher.html; like FeedFetcher-Google)", "Accept": "*/*"},
 ]
-_page_pref = {}  # host -> index of the profile that worked last time
+_page_pref = {}  # host -> index of the header profile that worked last time, or "curl"
 _BLOCKED = (403, 429, 503)
 BLOCKED_RETRY_SECONDS = 3600
+HOST_BLOCK_SECONDS = 6 * 3600
+_blocked_hosts = {}  # host -> time until which we don't even try (every attempt was refused)
+
+
+class HostBlocked(Exception):
+    """The site refuses this server on every attempt; page lookups for it are skipped for a few hours."""
+
+
+async def _curl_get(url: str, timeout: float):
+    """A request that looks like real Chrome at the TLS level (curl_cffi ships with yt-dlp[curl-cffi])."""
+    from curl_cffi.requests import AsyncSession  # ImportError = not installed -> caller skips this step
+    async with AsyncSession(impersonate="chrome") as session:
+        return await session.get(url, timeout=timeout, allow_redirects=True)
 
 
 async def get_page(client: httpx.AsyncClient, url: str, timeout: float = 15):
-    """GET an article page / image, switching header profile when the site blocks or drops us."""
+    """GET an article page / image. Tries the header profiles, then a Chrome-impersonating client; a site that
+    refuses everything is remembered for a few hours so we stop wasting requests (and log lines) on it."""
     host = urlsplit(url).netloc
+    if time.time() < _blocked_hosts.get(host, 0):
+        raise HostBlocked(host)
+
+    state_ = {"last": None, "blocked": False}
+
+    async def via_curl():
+        try:
+            r = await _curl_get(url, timeout)
+        except ImportError:
+            return None
+        except Exception as e:
+            state_["last"] = e
+            return None
+        if r.status_code in _BLOCKED:
+            state_["blocked"] = True
+            return None
+        if r.status_code >= 400:
+            state_["last"] = RuntimeError(f"HTTP {r.status_code}")
+            return None
+        _page_pref[host] = "curl"
+        return r
+
+    if _page_pref.get(host) == "curl":
+        r = await via_curl()
+        if r is not None:
+            return r
+
     order = list(range(len(PAGE_PROFILES)))
     if _page_pref.get(host) in order:
         order.remove(_page_pref[host])
         order.insert(0, _page_pref[host])
-    last = None
     for idx in order:
         try:
             r = await client.get(url, headers=PAGE_PROFILES[idx], timeout=timeout, follow_redirects=True)
             if r.status_code in _BLOCKED:
-                last = httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
+                state_["blocked"] = True
+                state_["last"] = httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
                 continue
             r.raise_for_status()
             _page_pref[host] = idx
             return r
         except httpx.TransportError as e:  # "Server disconnected", timeouts, resets...
-            last = e
-    raise last
+            state_["last"] = e
+
+    if _page_pref.get(host) != "curl":
+        r = await via_curl()
+        if r is not None:
+            log.info("%s only answers a Chrome-impersonating client: using that from now on", host)
+            return r
+
+    if state_["blocked"]:
+        _blocked_hosts[host] = time.time() + HOST_BLOCK_SECONDS
+        log.warning("%s refuses this server on every attempt (HTTP 403): skipping page lookups for it for %d hours. "
+                    "Posts still use the image from the RSS feed.", host, HOST_BLOCK_SECONDS // 3600)
+        raise HostBlocked(host)
+    raise state_["last"]
+
+
 _BAD_IMG = ("icon", "pixel", "avatar", "emoji", "spacer", "logo", "1x1")
 _TRACKING = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "igshid")
 

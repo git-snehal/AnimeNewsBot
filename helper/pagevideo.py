@@ -92,12 +92,15 @@ def parse_video_from_html(page: str):
 
 
 async def fetch_page_info(client: httpx.AsyncClient, page_url: str) -> dict:
-    from helper.fetcher import get_page  # late import: keep this module light
+    from helper.fetcher import HostBlocked, get_page  # late import: keep this module light
 
     empty = {"video": None, "where": None, "image": None}
     try:
         r = await get_page(client, page_url)
         info = parse_page(r.text[:MAX_HTML], str(r.url))
+    except HostBlocked:
+        log.debug("Page lookup skipped (site blocks this server): %s", page_url)
+        return empty
     except Exception as e:
         log.warning("Page lookup failed for %s: %s: %s", page_url, type(e).__name__, e)
         return empty
