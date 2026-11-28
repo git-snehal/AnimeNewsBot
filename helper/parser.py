@@ -80,7 +80,7 @@ _KIND_DEFS = [
         r"\bPVs?\b|\bpromo(?:tional)?\s+(?:video|clip)s?\b"
         r"|\b(?:new|first|1st|2nd|3rd|second|third|main|short|latest)\s+videos?\b(?!\s+games?)"
         r"|\bin\s+(?:a\s+|the\s+)?(?:new\s+|main\s+)?videos?\b(?!\s+games?)", re.I)),
-    ("visual", re.compile(r"\bkey\s+visuals?\b|\bposter\b", re.I)),
+    ("visual", re.compile(r"\b(?:key|new|main|teaser|character|story)\s+visuals?\b|\bvisuals?\s+(?:for|of)\b|\bposter\b", re.I)),
     (
         "season",
         re.compile(
@@ -89,10 +89,14 @@ _KIND_DEFS = [
             re.I,
         ),
     ),
-    ("date", re.compile(r"\b(?:release|premiere|air)\s+dates?\b|\bpremieres?\b|\bdebuts?\b", re.I)),
+    ("date", re.compile(
+        r"\b(?:release|premiere|air)\s+dates?\b|\bpremieres?\b|\bdebuts?\b"
+        r"|\btheatrical\s+(?:release|run|debut)\b|\bhits?\s+(?:japanese\s+)?theaters\b|\bin\s+(?:japanese\s+)?theaters\b"
+        r"|\b(?:sets?|announces?|confirms?|reveals?|schedules?|dates?)\b[^.|]{0,60}\breleases?\b"
+        r"|\breleases?\s+(?:window|on|in|for)\b|\bopens?\s+in\b", re.I)),
     ("cast", re.compile(
         r"\bcasts\b|\bcast\s+(?:members?|additions?)\b|\b(?:more|new|additional|main|voice|returning|full|guest)\s+cast\b"
-        r"|\bvoice\s+actors?\b|\bjoins?\s+(?:the\s+)?cast\b", re.I)),
+        r"|\bjoins?\s+(?:the\s+)?cast\b", re.I)),
 ]
 # Headlines that mention a season/cast/date but aren't that kind of announcement ("Season 2 Preview", "Episode 8 Recap")
 _NOT_NEWS_TYPE = re.compile(
@@ -103,7 +107,9 @@ _SEASON_NEWS = re.compile(
     r"|renewed|green-?lit|streams?|launches?)\b", re.I)
 
 
-def detect_kind(title: str, body: str, has_video: bool):
+def detect_kind(title: str, body: str = "", has_video: bool = False):
+    """News type, decided by the HEADLINE only. An article whose headline is about a release date stays a
+    release-date post even when its text mentions a trailer (that video is still attached, see video_hint)."""
     for key, rx in _KIND_DEFS:
         if rx.search(title):
             if key not in MEDIA_KINDS and _NOT_NEWS_TYPE.search(title):
@@ -111,15 +117,83 @@ def detect_kind(title: str, body: str, has_video: bool):
             if key == "season" and not _SEASON_NEWS.search(title):
                 continue
             return key
+    return None
+
+
+def video_hint(body: str, has_video: bool):
+    """The headline isn't about a video, but the article has / mentions one: look for it and attach it,
+    without labelling the post a trailer."""
     head = body[:400]
     for key, rx in _KIND_DEFS[:3]:
-        if rx.search(head):
+        if rx.search(head) or (has_video and rx.search(body)):
             return key
-    if has_video:
-        for key, rx in _KIND_DEFS[:3]:
-            if rx.search(body):
-                return key
-    return None
+    return "trailer" if has_video else None
+
+
+# --------------------------------------------------------------------------- official YouTube channels
+_YT_TRAILER = re.compile(
+    r"\b(?:trailers?|teasers?|pvs?|promo(?:tional)?\s+video|announcement\s+(?:trailer|video)|main\s+(?:trailer|video))\b"
+    r"|本予告|予告編|特報|ティザー|ＰＶ|(?<![A-Za-z])PV(?![A-Za-z])", re.I)
+_YT_SKIP = re.compile(
+    r"\b(?:clips?|episodes?\s*\d+|ep\.?\s*\d+|sub|dub|reaction|recap|creditless|nc(?:op|ed)|music\s+video|mv"
+    r"|shorts?|live\s*stream|behind\s+the\s+scenes|interview|preview|reveal\s+stream)\b"
+    r"|第\s*\d+\s*話|切り抜き|#\S|TVスポット|ＴＶスポット|\bCM\b", re.I)
+
+
+def is_trailer_video(title: str) -> bool:
+    """An official channel's upload that is a trailer / teaser / PV (not a clip, episode, preview or short)."""
+    return bool(_YT_TRAILER.search(title or "")) and not _YT_SKIP.search(title or "")
+
+
+def yt_kind(title: str) -> str:
+    t = title or ""
+    if re.search(r"\bteasers?\b|特報|ティザー", t, re.I):
+        return "teaser"
+    if re.search(r"\bpvs?\b|ＰＶ|(?<![A-Za-z])PV(?![A-Za-z])|promo(?:tional)?\s+video", t, re.I):
+        return "pv"
+    return "trailer"
+
+
+_YT_SEG_SKIP = re.compile(
+    r"^(?:(?:official|main|new|final|announcement|character|teaser|english|eng)\s+)*(?:trailers?|teasers?|pvs?|videos?|sub|dub)\b"
+    r"|^(?:netflix(?:\s+anime)?|crunchyroll|aniplex(?:\s+usa)?|muse\s+asia|toho\s+animation|kadokawa(?:\s+anime)?)$"
+    r"|\b(?:now\s+(?:streaming|available)|coming\s+(?:soon|to)|streaming\s+on|in\s+theaters|premieres?|releases?|airs?)\b"
+    r"|^\d{4}\b|^\(?\d{1,2}/\d{1,2}", re.I)
+
+
+def youtube_show(title: str):
+    """Show name from a YouTube title like 'SAKAMOTO DAYS Season 2 | Official Trailer | Netflix Anime'."""
+    t = title or ""
+    m = re.search(r"[『「“\"]([^』」”\"]{2,100})[』」”\"]", t)
+    if m:
+        cand = m.group(1)
+    else:
+        cand = next((seg.strip() for seg in re.split(r"\s*[|｜]\s*|\s+[-–—]\s+", t)
+                     if seg.strip() and not _YT_SEG_SKIP.search(seg.strip())), None)
+    if not cand:
+        return None
+    cand = re.sub(r"^(?:TV\s*anime|the\s+movie|movie|劇場版|TVアニメ)\s*", "", cand, flags=re.I).strip()
+    tokens = cand.split()
+    while len(tokens) > 1 and _is_modifier(tokens[-1], tokens[-2]):
+        tokens.pop()
+    show = " ".join(tokens).strip(" :-–—,;")
+    return show if 2 <= len(show) <= 100 else None
+
+
+def clean_youtube_description(text: str) -> str:
+    """First paragraph of a video description, minus links, hashtags, social plugs and copyright lines."""
+    keep = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            if keep:
+                break
+            continue
+        if re.search(r"https?://|www\.|@\w|#\w|subscribe|follow\s+us|official\s+(?:site|x|twitter|website)|►|▶|©|\(c\)",
+                     line, re.I):
+            continue
+        keep.append(line)
+    return " ".join(keep)
 
 
 # --------------------------------------------------------------------------- show title
@@ -130,7 +204,8 @@ _VERB_LIST = (
     "Returns Return Highlights Highlighted Introduces Introduced Features Joins Joined Ends Expands Opens Earns Wins "
     "Licenses Licensed Stars Inspires Reaches Begins Starts Plans Lands Marks Receives Gains Publishes Reports "
     "Updates Updated Offers Promises Counts Celebrates Collaborates Surpasses Tops Rises Falls Goes Becomes "
-    "Resumes Concludes Finishes Hints Pairs Teams Reunites Recruits Gives Takes Makes Streams"
+    "Resumes Concludes Finishes Hints Pairs Teams Reunites Recruits Gives Takes Makes Streams Spotlights Deploys "
+    "Showcases Details Kicks Unleashes Debut Reveal Celebrate"
 ).split()
 _VERB_RE = re.compile(r"\s(?:" + "|".join(sorted(set(_VERB_LIST), key=len, reverse=True)) + r")\b")
 # words that describe the news rather than the show; stripped from the end of what comes before the verb
@@ -161,12 +236,31 @@ def _is_modifier(tok: str, prev: str) -> bool:
     return False
 
 
+_NOT_SUBJECT = {"i", "you", "we", "they", "he", "she", "it", "to", "will", "can", "don't", "never", "who", "that", "not"}
+_FOR_SHOW = re.compile(r"\b(?:Revealed|Announced|Unveiled|Released|Confirmed|Dropped|Shared|Set|Out)\s+(?:For|Of)\s+(?:the\s+)?(.+)$", re.I)
+
+
+def _headline_verb(title: str):
+    """The verb that ends the show name: skip ones that belong to the title itself ('Until I Get Bored Reveals...')."""
+    for m in _VERB_RE.finditer(title):
+        before = title[: m.start()].split()
+        if before and before[-1].lower().strip(",.") in _NOT_SUBJECT:
+            continue
+        return m
+    return None
+
+
 def extract_show(title: str):
-    """The show/series the headline is about: everything before the first headline verb, minus descriptive words."""
-    m = _VERB_RE.search(title)
+    """The show/series the headline is about: everything before the first headline verb, minus descriptive words.
+    'New Trailer and Release Date Revealed for X' style headlines name the show after 'for'."""
+    m = _headline_verb(title)
     if not m:
         return None
-    tokens = title[: m.start()].split()
+    fm = _FOR_SHOW.search(title)
+    if fm and not story.tokens(title[: m.start()], drop_generic=True):
+        tokens = re.split(r"\s+(?:Ahead|After|Before|As|With|In|On|At)\s+", fm.group(1))[0].split()
+    else:
+        tokens = title[: m.start()].split()
     while len(tokens) > 1 and tokens[0].lower() in _LEAD_STRIP:
         tokens.pop(0)
     while len(tokens) > 1 and _is_modifier(tokens[-1], tokens[-2]):
@@ -283,11 +377,34 @@ def extract_studio(text: str):
     return None
 
 
+def _also_announced(title: str, date) -> str:
+    """'X Reveals Main Visual and Trailer, Confirms 2027 Release' is a trailer post that also has other news."""
+    for key, rx in _KIND_DEFS[3:]:
+        if not rx.search(title):
+            continue
+        if key == "date" and date:
+            return "Release Date" if re.search(r"\breleas|\btheat", title, re.I) else "Premiere Date"
+        if key == "visual":
+            return "Key Visual"
+        if key == "season" and _SEASON_NEWS.search(title):
+            return "New Season"
+        if key == "cast":
+            return "Cast"
+    if date and re.search(r"\b(?:20\d\d|january|february|march|april|may|june|july|august|september|october|november"
+                          r"|december|spring|summer|fall|autumn|winter)\b[^|]{0,30}\b(?:release|premiere|debut|window)",
+                          title, re.I):
+        return "Release Date"
+    return ""
+
+
 # --------------------------------------------------------------------------- put it together
 def enrich(article: dict, title: str, body: str) -> dict:
     title = clean_text(title)
-    youtube = extract_youtube_url(article.get("raw_html", ""))
+    from_youtube = bool(article.get("youtube_feed"))
+    youtube = extract_youtube_url(article["link"] if from_youtube else article.get("raw_html", ""))
     kind = detect_kind(title, body, bool(youtube))
+    if from_youtube and kind not in MEDIA_KINDS:
+        kind = yt_kind(article.get("title", "") + " " + title)
 
     facts = f"{title}. {body}"
     date = extract_date(facts, article.get("published"))
@@ -297,13 +414,19 @@ def enrich(article: dict, title: str, body: str) -> dict:
         kind = None  # a "premiere date" label without a date would be a lie
 
     if kind in MEDIA_KINDS:
-        official = re.search(r"\bofficial\b", f"{title} {body[:400]}", re.I)
+        official = from_youtube or re.search(r"\bofficial\b", f"{title} {body[:400]}", re.I)
         label = f"{'Official ' if official else ''}{KIND_NAME[kind]} Released"
+        also = _also_announced(title, date)
+        if also:
+            label = f"{KIND_NAME[kind]} & {also} Revealed"
+    elif kind == "date" and re.search(r"\breleas|\btheat", title, re.I):
+        label = "Release Date Revealed"
     else:
         label = KIND_LABEL.get(kind)
+    hint = None if kind in MEDIA_KINDS else video_hint(body, bool(youtube))
 
     platform, studio = extract_platform(facts), extract_studio(facts)
-    show = extract_show(title)
+    show = youtube_show(title) if from_youtube else extract_show(title)
     title_words = story.tokens(title, drop_generic=True)
     tok = story.tokens(show) if show else title_words
     sentences = split_sentences(body)
@@ -315,6 +438,7 @@ def enrich(article: dict, title: str, body: str) -> dict:
         "title_en": title,
         "kind": kind,
         "is_media": kind in MEDIA_KINDS,
+        "video_hint": hint,             # not a trailer post, but attach this kind of video when one is found
         "show": show,
         "story_tokens": " ".join(sorted(tok)),
         "title_tokens": " ".join(sorted(title_words)),

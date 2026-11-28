@@ -326,7 +326,7 @@ def _download_sync_impl(url: str, cfg=None, cookiefile=None):
     opts = _base_opts(notes, cfg, cookiefile) | {
         "format": _format_selector(),
         "merge_output_format": "mp4",
-        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(DOWNLOAD_DIR, f"%(id)s_{int(time.time() * 1000) % 10**8}.%(ext)s"),
         "noplaylist": True,
         "max_filesize": MAX_VIDEO_MB * 1024 * 1024,
         "match_filter": match_filter_func(f"duration <= {MAX_VIDEO_SECONDS} & !is_live"),
@@ -510,55 +510,90 @@ def season_numbers(text: str) -> set:
     return out
 
 
-def _search_sync_impl(show: str, kind_name: str, article_title: str = "", published=None, cookiefile=None):
-    """Last-resort YouTube search. Deliberately strict: no video beats the wrong video.
+_NAME_STOP = {"the", "and", "season", "anime", "movie", "film", "part", "of", "no", "wa", "ga", "to", "ni", "tv"}
 
-    A result is only accepted when its title contains every word of the show name, it is not a reaction/review/etc.,
-    its length fits, it doesn't name a different season than the article, and it was uploaded recently.
-    Returns {"url", "title", "channel"} or None.
+
+def _name_words(name: str) -> list:
+    return [w for w in re.findall(r"[a-z0-9]+", (name or "").lower().replace("'", "")) if len(w) > 1 and w not in _NAME_STOP]
+
+
+def title_has_name(title: str, all_names: list) -> bool:
+    """Does a video title name the show? Any of its names counts (English, romaji, synonyms). Short names (1-2 words)
+    must appear completely; longer ones need 3 of every 4 words ('Mobile Suit Gundam SEED FREEDOM ZERO' matches
+    'Gundam SEED FREEDOM ZERO | Official Trailer')."""
+    norm = " " + re.sub(r"[^a-z0-9]+", " ", (title or "").lower().replace("'", "")) + " "
+    words = set(norm.split())
+    for name in all_names:
+        ws = _name_words(name)
+        if not ws:
+            continue
+        hit = sum(1 for w in ws if w in words)
+        if (len(ws) <= 2 and hit == len(ws)) or (len(ws) > 2 and hit / len(ws) >= 0.75):
+            return True
+    return False
+
+
+def _search_sync_impl(show: str, kind_name: str, article_title: str = "", published=None, cookiefile=None,
+                      alt_names=None):
+    """Last-resort YouTube search. Strict on WHAT the video is, flexible on how the show is NAMED.
+
+    Accepted only when the title names the show (any of its names), it is a trailer / teaser / PV (not a reaction,
+    review, episode preview or fan edit), its length fits, it doesn't name a different season than the article, and
+    it was uploaded recently. Returns ({"url", "title", "channel"} or None, "why nothing matched").
     """
-    words = [w for w in re.findall(r"[a-z0-9]+", show.lower()) if len(w) > 2]
-    if not words:
-        return None
+    all_names = [n for n in [show, *(alt_names or [])] if n]
+    if not any(_name_words(n) for n in all_names):
+        return None, "no usable show name"
     want = season_numbers(article_title)
     max_len = min(MAX_VIDEO_SECONDS, 600)
-
-    with YoutubeDL(_base_opts(cookiefile=cookiefile) | {"extract_flat": True}) as ydl:
-        res = ydl.extract_info(f"ytsearch8:{show} {kind_name} anime", download=False)
-
-    cands, why, entries = [], {}, (res or {}).get("entries") or []
+    why, cands, seen, total = {}, [], set(), 0
 
     def reject(reason):
         why[reason] = why.get(reason, 0) + 1
 
-    for e in entries:
-        title = e.get("title") or ""
-        norm = " " + re.sub(r"[^a-z0-9]+", " ", title.lower()) + " "
-        dur = e.get("duration") or 0
-        if not e.get("id") or not all(w in norm for w in words):
-            reject("title lacks the show name")
-            continue
-        if _BAD_TITLE.search(norm):
-            reject("reaction/review/episode preview")
-            continue
-        if _FAN_MADE.search(norm):
-            reject("fan-made")
-            continue
-        if not _VIDEO_KIND.search(norm):
-            reject("not a trailer/teaser/PV")
-            continue
-        if dur and (dur > max_len or dur < 5):
-            reject("wrong length")
-            continue
-        got = season_numbers(title)
-        if (want and got and not (want & got)) or (not want and any(n >= 2 for n in got)):
-            reject("different season")  # e.g. the article is about season 2, this is a season 1 video
-            continue
-        cands.append({"url": f"https://www.youtube.com/watch?v={e['id']}", "title": title,
-                      "score": 2 * bool(re.search(r"\bofficial\b", norm))})
+    queries = [f"{show} {kind_name}"]
+    romaji = next((n for n in alt_names or [] if n and n.lower() != show.lower()), None)
+    if romaji:
+        queries.append(f"{romaji} {kind_name}")
+    for q in queries:
+        with YoutubeDL(_base_opts(cookiefile=cookiefile) | {"extract_flat": True}) as ydl:
+            res = ydl.extract_info(f"ytsearch10:{q}", download=False)
+        entries = (res or {}).get("entries") or []
+        total += len(entries)
+        for e in entries:
+            vid = e.get("id")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            title = e.get("title") or ""
+            norm = " " + re.sub(r"[^a-z0-9]+", " ", title.lower()) + " "
+            dur = e.get("duration") or 0
+            if not title_has_name(title, all_names):
+                reject("name mismatch")
+                continue
+            if _BAD_TITLE.search(norm):
+                reject("reaction/review/episode")
+                continue
+            if _FAN_MADE.search(norm):
+                reject("fan-made")
+                continue
+            if not _VIDEO_KIND.search(norm):
+                reject("not a trailer/PV")
+                continue
+            if dur and (dur > max_len or dur < 5):
+                reject("wrong length")
+                continue
+            got = season_numbers(title)
+            if (want and got and not (want & got)) or (not want and any(n >= 2 for n in got)):
+                reject("different season")
+                continue
+            score = 2 * bool(re.search(r"\bofficial\b", norm)) + bool(re.search(
+                r"crunchyroll|aniplex|toho|netflix|kadokawa|muse|official|anime", (e.get("channel") or e.get("uploader") or "").lower()))
+            cands.append({"url": f"https://www.youtube.com/watch?v={vid}", "title": title, "score": score})
+        if cands:
+            break
 
-    cands.sort(key=lambda c: -c["score"])   # an "Official ..." upload first; otherwise YouTube's own order
-
+    cands.sort(key=lambda c: -c["score"])
     ref = (published or datetime.now(timezone.utc)).date()
     for cand in cands[:3]:
         try:
@@ -572,16 +607,16 @@ def _search_sync_impl(show: str, kind_name: str, article_title: str = "", publis
         if up:
             try:
                 if datetime.strptime(up, "%Y%m%d").date() < ref - timedelta(days=SEARCH_MAX_AGE_DAYS):
-                    reject("uploaded too long ago")  # probably a previous trailer of a show that just got news
+                    reject("too old")
                     continue
             except ValueError:
                 pass
         cand["channel"] = info.get("channel") or info.get("uploader")
-        return cand
+        return cand, ""
 
-    log.info("YouTube search found nothing for %r: %d results, rejected: %s", show, len(entries),
-             ", ".join(f"{n}x {r}" for r, n in why.items()) or "none")
-    return None
+    summary = f"{total} results" + (": " + ", ".join(f"{n}x {r}" for r, n in why.items()) if why else "")
+    log.info("YouTube search found nothing for %r (names: %s): %s", show, ", ".join(all_names[:4]), summary)
+    return None, summary
 
 
 def probe_configs() -> list:
@@ -624,9 +659,9 @@ def _diagnose_sync(url: str, cfg=None) -> dict:
         return _diagnose_sync_impl(url, cfg, ck)
 
 
-def _search_sync(show: str, kind_name: str, article_title: str = "", published=None):
+def _search_sync(show: str, kind_name: str, article_title: str = "", published=None, alt_names=None):
     with _cookie_copy() as ck:
-        return _search_sync_impl(show, kind_name, article_title, published, ck)
+        return _search_sync_impl(show, kind_name, article_title, published, ck, alt_names)
 
 
 async def probe_video(url: str, stop_on_success: bool = False) -> list:
@@ -686,13 +721,30 @@ async def diagnose_video(url: str) -> dict:
         return {"ok": False, "error": str(e), "n_formats": 0}
 
 
-async def search_trailer(show: str, kind_name: str, article_title: str = "", published=None):
+async def search_trailer(show: str, kind_name: str, article_title: str = "", published=None, alt_names=None):
+    """-> (match dict or None, why nothing matched)"""
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_search_sync, show, kind_name, article_title, published), timeout=90)
+            asyncio.to_thread(_search_sync, show, kind_name, article_title, published, alt_names), timeout=120)
     except Exception as e:
         log.warning("Trailer search failed for %r: %s", show, e)
-        return None
+        return None, f"search error: {type(e).__name__}"
+
+
+def purge_downloads(max_age: int = 3600):
+    """Leftovers from a crash or a failed download (.part files, fragments). Called at start."""
+    if not os.path.isdir(DOWNLOAD_DIR):
+        return 0
+    n = 0
+    for f in os.listdir(DOWNLOAD_DIR):
+        path = os.path.join(DOWNLOAD_DIR, f)
+        try:
+            if os.path.isfile(path) and time.time() - os.path.getmtime(path) > max_age:
+                os.remove(path)
+                n += 1
+        except OSError:
+            pass
+    return n
 
 
 def cleanup(path: str):

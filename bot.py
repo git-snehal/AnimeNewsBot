@@ -1,21 +1,32 @@
 import asyncio
 import html
+import io
 import logging
 import os
 import shutil
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
-import httpx
-from pyrogram import Client, filters, idle
-from pyrogram.enums import ParseMode
+# Run from the bot's own folder, whatever folder systemd / pm2 / your shell starts it from: the database, cookies,
+# downloads and logs are all relative paths.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-from config import (
-    ADMIN_IDS, API_HASH, API_ID, BOT_TOKEN, COOKIES_PATH, DAILY_STATS, DOWNLOAD_TRAILERS,
-    PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
+import httpx  # noqa: E402
+from pyrogram import Client, filters, idle  # noqa: E402
+from pyrogram.enums import ParseMode  # noqa: E402
+
+from config import (  # noqa: E402
+    ADMIN_IDS, API_HASH, API_ID, BOT_TOKEN, CONTROL_GROUP_ID, COOKIES_PATH, DAILY_STATS, DOWNLOAD_TRAILERS,
+    IMDB_RATINGS, NETFLIX_TOP10, PAGE_PROXY, PAGE_VIDEO_FALLBACK, POLL_INTERVAL, RSS_FEEDS, TIMEZONE, TZ,
 )
-from database.db import Database
-from helper.downloader import cleanup, cookie_summary, environment_info, runtime_warnings, set_active_cfg
+from helper.logfile import collect as collect_logs, setup_logging  # noqa: E402
+
+setup_logging()
+
+from database.db import Database  # noqa: E402
+from helper import imdb, netflix  # noqa: E402
+from helper.downloader import (  # noqa: E402
+    cleanup, cookie_summary, environment_info, purge_downloads, runtime_warnings, set_active_cfg)
 from helper.fetcher import fetch_feed
 from helper.commands import help_text, register_commands, set_admin_menu
 from helper.news_job import broadcast_news_loop
@@ -24,14 +35,15 @@ from helper.state import state
 from helper.updater import maybe_auto_update, report as update_report, restart_process, run_update
 from helper.stats import daily_stats_loop, day_report, week_report
 from helper.parser import extract_youtube_url
-from helper.trailer_test import run_probe_report, run_trailer_test
+from helper.trailer_test import clip_html, run_probe_report, run_trailer_test  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
 
 app = Client("anime_news_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 db = Database()
 admin_only = filters.user(ADMIN_IDS)
+# where log files may be sent: private chats with an admin, or the admins-only control group
+private_or_control = filters.private | (filters.chat(CONTROL_GROUP_ID) if CONTROL_GROUP_ID else filters.private)
 
 
 def _is_admin(message) -> bool:
@@ -96,13 +108,16 @@ async def status_cmd(client, message):
         "<b>Feeds</b>",
     ]
     for name, f in state.feeds.items():
-        lines.append(f"   {'✅' if f['ok'] else '❌'} {name} — " + (f"{f['entries']} entries" if f["ok"] else f["error"] or "failed"))
+        lines.append(f"   {'✅' if f['ok'] else '❌'} {html.escape(name)} — "
+                     + (f"{f['entries']} entries" if f["ok"] else html.escape(f["error"] or "failed")))
     if not state.feeds:
         lines.append("   (not checked yet)")
     lines += [
         "",
         f"Cookies: {'✅ present' if os.path.exists(COOKIES_PATH) else '❌ none (set with /setcookies)'}",
-        f"Trailer downloads: {'on' if DOWNLOAD_TRAILERS else 'off'} · page lookup: {'on' if PAGE_VIDEO_FALLBACK else 'off'}",
+        f"Trailer downloads: {'on' if DOWNLOAD_TRAILERS else 'off'} · page lookup: {'on' if PAGE_VIDEO_FALLBACK else 'off'}"
+        f" · proxy for blocked sites: {'on' if PAGE_PROXY else 'off'}",
+        f"Netflix Top 10: {'on' if NETFLIX_TOP10 else 'off'} · IMDb ratings: {'on' if IMDB_RATINGS else 'off'}",
         f"Daily report: {'on' if DAILY_STATS else 'off'}",
         f"Posted all-time: {db.total_posted()}",
     ]
@@ -122,7 +137,49 @@ async def feeds_cmd(client, message):
         else:
             lines.append(f"❌ <b>{html.escape(name)}</b> — {html.escape(f['error'])}")
             lines.append(f"      tried: {html.escape(', '.join(f['attempts']) or '-')}")
-    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await status.edit_text(clip_html("\n".join(lines)), parse_mode=ParseMode.HTML)
+
+
+@app.on_message(admin_only & private_or_control & filters.command("logs"))
+async def logs_cmd(client, message):
+    """/logs · /logs trailers · /logs errors · /logs 6h · /logs trailers 24h"""
+    text, desc, n = await asyncio.to_thread(collect_logs, message.command[1:])
+    if not n:
+        await message.reply_text(f"📄 No log lines for that ({desc}).")
+        return
+    f = io.BytesIO(text.encode("utf-8"))
+    f.name = f"bot-logs-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.txt"
+    await message.reply_document(f, caption=f"📄 {desc}: {n} lines")
+
+
+@app.on_message(admin_only & filters.command("netflixtest"))
+async def netflixtest_cmd(client, message):
+    status = await message.reply_text("⏳ Reading this week's Netflix Top 10 lists (the first run checks a few hundred "
+                                      "titles and can take several minutes)…")
+    try:
+        async with httpx.AsyncClient() as http:
+            res = await netflix.post_week(client, db, http, message.chat.id, force=True)
+        if res and res["items"]:
+            await status.edit_text(f"✅ Preview above: {len(res['items'])} anime in the Top 10 lists for the week "
+                                   f"ending {res['week']}. The channel gets it automatically once per week.")
+        else:
+            await status.edit_text(f"ℹ️ No anime in any country's Top 10 for the week ending {res and res['week']}.")
+    except Exception as e:
+        log.exception("Netflix test failed")
+        await status.edit_text(f"❌ Netflix test failed: {html.escape(str(e))}")
+
+
+@app.on_message(admin_only & filters.command("imdbtest"))
+async def imdbtest_cmd(client, message):
+    status = await message.reply_text("⏳ Checking airing shows and IMDb's rating files (the first run downloads about "
+                                      "300 MB and can take several minutes)…")
+    try:
+        async with httpx.AsyncClient() as http:
+            text = await imdb.test_report(client, db, http, message.chat.id)
+        await status.edit_text(clip_html(text), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.exception("IMDb test failed")
+        await status.edit_text(f"❌ IMDb test failed: {html.escape(str(e))}")
 
 
 async def _restart_soon(client, delay: float = 3):
@@ -253,6 +310,9 @@ async def main():
     await start_with_retry(app, "anime_news_bot")
     await register_commands(app)
     log.info("Bot started. Admins: %s", ADMIN_IDS)
+    removed = purge_downloads()
+    if removed:
+        log.info("Removed %d leftover files from the downloads folder", removed)
     try:
         for w in runtime_warnings(await asyncio.to_thread(environment_info)):
             log.warning("YouTube downloads: %s", w)
@@ -262,6 +322,8 @@ async def main():
         asyncio.create_task(broadcast_news_loop(app, db)),
         asyncio.create_task(daily_stats_loop(app, db)),
         asyncio.create_task(ytdlp_update_loop(app)),
+        asyncio.create_task(netflix.netflix_loop(app, db)),
+        asyncio.create_task(imdb.imdb_loop(app, db)),
     ]
     try:
         await idle()

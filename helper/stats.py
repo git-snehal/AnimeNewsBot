@@ -28,7 +28,11 @@ def day_report(db, d: date, title: str = None, all_time: bool = True) -> str:
     lines = [f"📊 <b>{_esc(title or d.strftime('%A, %d %b %Y'))}</b>", "", f"📰 Posted: <b>{s['posted']}</b>"]
     if s["posted"]:
         lines.append(f"   🎬 Trailers / teasers / PVs: {s['media']} ({s['with_video']} with video)")
-        lines.append(f"   🗞 Other news: {s['posted'] - s['media']}")
+        if s.get("ratings"):
+            lines.append(f"   ⭐ IMDb episode ratings: {s['ratings']}")
+        if s.get("netflix"):
+            lines.append(f"   📺 Netflix Top 10 chart: {s['netflix']}")
+        lines.append(f"   🗞 Other news: {s['posted'] - s['media'] - s.get('ratings', 0) - s.get('netflix', 0)}")
         lines += ["", "<b>By source</b>"]
         lines += [f"   • {_esc(src)} — {n}" for src, n in s["by_source"]]
     if s["duplicates"]:

@@ -8,8 +8,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import feedparser
 import httpx
 
-from config import BLOCKED_WORDS, ENTRIES_PER_FEED, RSS_FEEDS
+from config import BLOCKED_WORDS, ENTRIES_PER_FEED, PAGE_PROXY, RSS_FEEDS
 from database.db import norm_title
+from helper.parser import clean_youtube_description, is_trailer_video
 from helper.state import state
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,33 @@ _blocked_hosts = {}  # host -> time until which we don't even try (every attempt
 
 class HostBlocked(Exception):
     """The site refuses this server on every attempt; page lookups for it are skipped for a few hours."""
+
+
+_proxy_client = None
+
+
+def proxy_client():
+    """Shared client that goes through PAGE_PROXY (e.g. Cloudflare WARP), or None when no proxy is set."""
+    global _proxy_client
+    if PAGE_PROXY and _proxy_client is None:
+        _proxy_client = httpx.AsyncClient(proxy=PAGE_PROXY, follow_redirects=True)
+    return _proxy_client
+
+
+async def _via_proxy(url: str, headers: dict, timeout: float):
+    """One attempt through PAGE_PROXY. Returns the response, or None (no proxy / failed / still refused)."""
+    pc = proxy_client()
+    if pc is None:
+        return None
+    try:
+        r = await pc.get(url, headers=headers, timeout=timeout)
+    except Exception as e:
+        log.info("Proxy attempt for %s failed: %s: %s", urlsplit(url).netloc, type(e).__name__, e)
+        return None
+    if r.status_code >= 400:
+        log.info("Proxy attempt for %s answered HTTP %s", urlsplit(url).netloc, r.status_code)
+        return None
+    return r
 
 
 async def _curl_get(url: str, timeout: float):
@@ -82,6 +110,10 @@ async def get_page(client: httpx.AsyncClient, url: str, timeout: float = 15):
         r = await via_curl()
         if r is not None:
             return r
+    if _page_pref.get(host) == "proxy":
+        r = await _via_proxy(url, PAGE_PROFILES[1], timeout)
+        if r is not None:
+            return r
 
     order = list(range(len(PAGE_PROFILES)))
     if _page_pref.get(host) in order:
@@ -106,10 +138,18 @@ async def get_page(client: httpx.AsyncClient, url: str, timeout: float = 15):
             log.info("%s only answers a Chrome-impersonating client: using that from now on", host)
             return r
 
+    if state_["blocked"] and _page_pref.get(host) != "proxy":
+        r = await _via_proxy(url, PAGE_PROFILES[1], timeout)
+        if r is not None:
+            _page_pref[host] = "proxy"
+            log.info("%s only answers through PAGE_PROXY: using the proxy for it from now on", host)
+            return r
+
     if state_["blocked"]:
         _blocked_hosts[host] = time.time() + HOST_BLOCK_SECONDS
-        log.warning("%s refuses this server on every attempt (HTTP 403): skipping page lookups for it for %d hours. "
-                    "Posts still use the image from the RSS feed.", host, HOST_BLOCK_SECONDS // 3600)
+        log.warning("%s refuses this server on every attempt (HTTP 403%s): skipping page lookups for it for %d hours. "
+                    "Posts still use the image from the RSS feed.", host,
+                    ", proxy too" if PAGE_PROXY else ", no PAGE_PROXY set", HOST_BLOCK_SECONDS // 3600)
         raise HostBlocked(host)
     raise state_["last"]
 
@@ -143,6 +183,8 @@ def passes_rules(entry, value) -> bool:
     """Per-feed filters (see config.py). No rules = everything passes."""
     if not isinstance(value, dict):
         return True
+    if value.get("youtube") and not is_trailer_video(entry.get("title", "")):
+        return False
     paths = value.get("allow_paths")
     if paths and not any(urlsplit(entry.get("link", "")).path.startswith(p) for p in paths):
         return False
@@ -175,8 +217,11 @@ def extract_image(entry):
     return None
 
 
-def _bodies(entry):
+def _bodies(entry, youtube=False):
     """(best text for the blurb, everything that might contain a video link)"""
+    if youtube:
+        desc = clean_youtube_description(entry.get("summary", "") or "")
+        return desc, entry.get("link", "")
     parts = [entry.get("summary", "")] + [c.get("value", "") for c in entry.get("content", []) or []]
     parts = [p for p in parts if p]
     extra = [entry.get("link", "")]
@@ -207,10 +252,13 @@ async def _fetch_feed(client: httpx.AsyncClient, name: str, value, force: bool =
         combos.remove(pref)
         combos.insert(0, pref)
 
-    attempts, detail = [], None
+    attempts, detail, started = [], None, time.monotonic()
     for url, idx in combos:
+        if time.monotonic() - started > 120:   # a very slow site must not hold up the whole cycle
+            attempts.append("gave up after 2 min")
+            break
         try:
-            r = await client.get(url, headers=HEADER_PROFILES[idx], timeout=20, follow_redirects=True)
+            r = await client.get(url, headers=HEADER_PROFILES[idx], timeout=45, follow_redirects=True)
             attempts.append(f"{r.status_code}")
             if r.status_code != 200:
                 continue
@@ -231,8 +279,22 @@ async def _fetch_feed(client: httpx.AsyncClient, name: str, value, force: bool =
         except Exception as e:
             attempts.append(type(e).__name__)
 
-    if attempts and set(attempts) == {"403"}:
-        error = "blocked by the site (HTTP 403), retrying hourly"
+    if attempts and set(attempts) <= {"403", "429", "503"} and PAGE_PROXY:
+        for url in feed_urls(value):
+            r = await _via_proxy(url, HEADER_PROFILES[0], 25)
+            if r is None:
+                continue
+            parsed = await asyncio.to_thread(feedparser.parse, r.content)
+            if parsed.entries:
+                attempts.append("proxy 200")
+                state.feed_blocked_until.pop(name, None)
+                state.feeds[name] = {"ok": True, "entries": len(parsed.entries), "error": "", "url": url + " (via proxy)",
+                                     "profile": "proxy", "attempts": attempts, "at": datetime.now(timezone.utc)}
+                return name, parsed.entries
+        attempts.append("proxy refused")
+
+    if attempts and set(attempts) <= {"403", "proxy refused"}:
+        error = "blocked by the site (HTTP 403" + (", proxy too" if PAGE_PROXY else "") + "), retrying hourly"
         state.feed_blocked_until[name] = time.time() + BLOCKED_RETRY_SECONDS
     elif detail:
         error = detail
@@ -247,6 +309,12 @@ async def _fetch_feed(client: httpx.AsyncClient, name: str, value, force: bool =
 fetch_feed = _fetch_feed
 
 
+def _blocked(title: str) -> bool:
+    """BLOCKED_WORDS match whole words only: 'recap' blocks 'Episode 3 Recap', not 'Recaptured'."""
+    t = title.lower()
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", t) for w in BLOCKED_WORDS)
+
+
 async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES_PER_FEED):
     """db=None skips the 'already posted' filter (used by the test commands)."""
     results = await asyncio.gather(*(_fetch_feed(client, n, u) for n, u in RSS_FEEDS.items()))
@@ -258,7 +326,7 @@ async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES
             link, title = entry.get("link"), entry.get("title")
             if not link or not title:
                 continue
-            if any(w in title.lower() for w in BLOCKED_WORDS):
+            if _blocked(title):
                 continue
             link = clean_link(link)
             tn = norm_title(title)
@@ -266,7 +334,9 @@ async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES
                 continue
             seen_links.add(link)
             seen_titles.add(tn)
-            body, raw = _bodies(entry)
+            rules = RSS_FEEDS.get(source)
+            youtube = bool(isinstance(rules, dict) and rules.get("youtube"))
+            body, raw = _bodies(entry, youtube)
             articles.append(
                 {
                     "title": title,
@@ -276,6 +346,7 @@ async def fetch_new_articles(client: httpx.AsyncClient, db, limit: int = ENTRIES
                     "raw_html": raw,
                     "image_url": extract_image(entry),
                     "published": _published(entry),
+                    "youtube_feed": youtube,
                 }
             )
     # oldest first so the channel reads chronologically

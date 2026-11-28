@@ -1,214 +1,133 @@
 <div align="center">
 
-#  Automated Anime News Bot
-
 <img src="https://github.com/git-snehal/git-snehal/blob/main/assets/News.gif" width="100%" alt="Anime News Bot Demo" />
 
-### *A fast, autonomous Telegram bot that aggregates, cleans, formats and broadcasts anime news, and attaches the official YouTube trailer when there is one.*
+### *A Telegram bot that collects anime news, posts each story once, attaches the official trailer, and adds weekly Netflix charts and IMDb episode ratings with images it draws itself.*
 
 </div>
 
 ---
 
-## 🌟 Live Preview Layout
+## What's new in v3
 
-**Trailers, teasers and PVs** (video posts) put everything on one header line: bold title, italic news type, and a bold `🎬 NEW TRAILER` tag, with the downloaded video attached and notification sound on.
+| | |
+|---|---|
+| 🎬 **Trailers found much more often** | Official YouTube channels are now feeds (Crunchyroll, Netflix Anime, Aniplex USA, TOHO animation, KADOKAWA, Muse Asia), so trailers arrive with the video attached. The YouTube search matches every name a show has (English, romaji, synonyms from AniList) and only needs most of a long name. |
+| 🏷 **Correct news type** | The headline decides the label. "Movie Sets Theatrical Release for May 2027" is a **Release Date** post, even when the article also mentions a trailer (that trailer is still attached as a bonus). |
+| 🖼 **Portrait key visuals** | The bot looks at the pictures inside the article and prefers a portrait key visual / poster over the wide preview image. |
+| 🌐 **Sites that block your server** | `PAGE_PROXY` (e.g. Cloudflare WARP) is used only after a site answers 403, for article pages and feeds (ANN). |
+| 📺 **Netflix Top 10, weekly** | From Netflix's official data: every anime in any country's Top 10, ranked by number of countries, as a chart image. |
+| ⭐ **IMDb episode ratings** | Follows the most popular airing anime and posts an episode when it reaches 8.5+ with 300+ votes (configurable), as a portrait rating card. Max 3 a day. |
+| 📄 **/logs** | Get the log as a .txt file: `/logs trailers` shows one line per trailer post with the reason when the video was missing. |
+| 🧹 **Fixes** | Runs from its own folder whatever directory starts it; every new feed is seeded (no backlog floods); `/updateytdlp` error messages no longer break; leftover downloads are cleaned at start; whole-word `BLOCKED_WORDS`. |
+
+---
+
+## Post layout
+
+**Trailers, teasers and PVs** (video, notification on):
 
 > **✦ Shadow Diver Donghua** — *Trailer Released*  |  🎬 **NEW TRAILER**
->
-> > Studio Tumble has dropped a new trailer for the Shadow Diver (Long Xin Shaonu) donghua film. The Studio Tumble and Flint Sugar co-production, which is also a Made by Bilibili title, …
+> > Studio Tumble has dropped a new trailer for the Shadow Diver donghua film…
 >
 > **January 6, 2027** • **Netflix** • Studio **TROYCA**
->
-> > **╰ @Od3nsAnimeNews**
+> > **╰ @YourChannel**
 
-**Regular news** uses the same layout with a plain `✦ **Show** — *Label*` header (no tag) and is sent silently.
-
-* The info line is `Date • Platform • Studio X`. The date, platform and studio name are bold, the word "Studio" is plain, and anything the bot can't find is simply left out.
-* **Long articles stay tidy:** a blurb of two sentences or fewer is a normal quote. Anything longer is written in full inside a collapsed, tap-to-expand quote.
-* The signature (`SIGNATURE` in `config.env`, with the `╰ ` prefix) always sits in its own bold quote at the bottom.
+**Regular news** uses the same layout without the tag and is sent silently. **Netflix** and **IMDb** posts are an image the bot draws (1080×1350) with a short caption.
 
 ---
 
-## 🚀 Key Features
+## Setup
 
-* **🤖 Fully Autonomous RSS Aggregator:** scans Anime News Network (India edition), ComicBook.com (anime news), Crunchyroll News, Anime Corner and Anime Trending concurrently. ANN's "all" feed is filtered to its news sections (reviews and advertorials are dropped); ComicBook.com is limited to its `/anime/news/` articles and shown with its original headline. Each feed's rules live in `config.py`.
-* **🧠 Smart Deduplication:** SQLite tracking by link and headline. The same story from several outlets within 48 hours is posted once: trailers/teasers/PVs and typed news (season, cast, date...) match on the show name and news type, plain news matches on the headline's key words. If the first outlet only had a photo and a later one has the trailer video, the bot edits the video into the original post.
-* **🧩 Rule-Based Formatting (no paid API):** news type, show title, premiere date, platform and studio are extracted from the article text. A field that can't be found is simply left out.
-* **🎬 Trailer Videos (`yt-dlp`):** finds the YouTube video in the feed item, falls back to the article page (`og:video`, JSON-LD, embeds inside the article body only), downloads it and posts it with the news.
-* **🖼 Images Always:** uses the feed image, then the article's `og:image`, and uploads the picture itself if Telegram can't fetch the URL.
-* **🌐 Auto-Translation:** only runs when the text isn't English, so English titles are never mangled.
-* **📊 Daily Report:** every day the admins get a summary of how many posts went out, how many were trailers/teasers/PVs, and a per-source breakdown.
-* **🛠 Admin Commands:** `/stats`, `/status`, `/fetchnow`, `/pause`, `/resume`, `/setcookies`, all in the "/" menu.
-* **⚡ Non-Blocking Architecture:** feed fetching, translation and downloads run off the event loop, so commands respond instantly even during background work.
-* **🛡 Resilient:** FloodWait handling, video → photo → text fallback, and a bad article is retried 3 times and then skipped so it can never block the queue.
+1. Python **3.11+** (3.12 recommended) and **ffmpeg**.
+2. `pip install -r requirements.txt`
+3. Copy `config.env.example` to `config.env` and fill it in.
+4. Add the bot as an **admin of your channel** (post messages).
+5. `python preview.py` shows sample posts offline · `python check_feeds.py` shows what the feeds contain · `python bot.py` runs the bot.
 
----
+**First start:** every feed the bot hasn't seen before is "seeded": its current items are marked as seen instead of being posted, so the channel isn't flooded. This also happens for any feed you add later. The Netflix job posts the latest week once; the IMDb job treats older episodes as history and only considers each show's two newest episodes plus everything rated from then on.
 
-## 🧰 Tech Stack
-
-* **Language:** Python 3.11 or newer (3.12 recommended). yt-dlp has deprecated 3.10, and the newest yt-dlp / YouTube solver need 3.11+
-* **Telegram Framework:** Pyrofork (async MTProto client, Pyrogram-compatible)
-* **Feeds:** `feedparser` + `httpx`
-* **Page parsing:** `beautifulsoup4`
-* **Media Extraction:** `yt-dlp` (+ ffmpeg)
-* **Database:** SQLite3
-* **Translation:** `deep-translator`
-
----
-
-## ⚙️ Setup
-
-1. Install **ffmpeg** (needed to merge video and audio). Recent `yt-dlp` versions also want a JavaScript runtime such as Deno for YouTube.
-2. `pip install -r requirements.txt` (this also installs `deno`, the JavaScript runtime that YouTube downloads need, and `yt-dlp-ejs`)
-3. Copy `config.env.example` to `config.env` and fill it in (see below).
-4. Add the bot as an **admin of your channel** with permission to post.
-5. `python preview.py` shows sample posts offline. `python check_feeds.py` shows what your feeds really contain. `python bot.py` runs the bot.
-
-On the first start the bot marks everything currently in the feeds as seen, so it doesn't flood your channel. Set `SEED_ON_FIRST_RUN=false` to disable that.
-
-### Configuration (`config.env`)
-
-```env
-# --- required ---
-API_ID=1234567
-API_HASH=your_api_hash
-BOT_TOKEN=your_bot_token
-CHANNEL_ID=@your_channel          # or -100xxxxxxxxxx
-OWNER_ID=123456789                # your Telegram user id
-ADMIN_IDS=                        # more admins, comma separated (optional)
-
-# --- look ---
-SIGNATURE=@OD3NS_ANIMES
-SHOW_SOURCE_BUTTON=true           # small "🔗 Source" button under each post
-DISCUSSION_LINK=                  # optional "💬 Discussion" button
-SILENT_REGULAR_NEWS=true          # regular news silent, trailers with sound
-PIN_TRAILERS=false
-
-# --- trailers ---
-DOWNLOAD_TRAILERS=true
-PAGE_VIDEO_FALLBACK=true          # look for the video on the article page if the feed has none
-YT_SEARCH_FALLBACK=true           # last resort when feed + article page have no video: strict YouTube search
-YOUTUBE_POT_ENABLED=true           # use the PO-token provider when it is running
-YOUTUBE_POT_URL=http://127.0.0.1:4416
-YTDLP_AUTO_UPDATE=true             # once a day: update yt-dlp + solver, restart only if something changed
-YTDLP_UPDATE_PRE=true              # include nightly builds
-YTDLP_PROXY=                      # optional proxy for YouTube only, e.g. socks5://127.0.0.1:40000
-YTDLP_REMOTE_COMPONENTS=auto           # auto = use the yt-dlp-ejs package | off | ejs:github | ejs:npm
-YTDLP_JS_RUNTIME_PATH=            # only if the bot can't find deno/node, e.g. /root/.deno/bin/deno
-MAX_VIDEO_MB=150
-MAX_VIDEO_SECONDS=600
-MAX_VIDEO_HEIGHT=720
-COOKIES_PATH=cookies.txt
-
-# --- polling & report ---
-POLL_INTERVAL=600
-BLOCKED_WORDS=puzzles vol,recap       # titles containing any of these are never posted
-DISABLED_FEEDS=                   # feed names to switch off, comma separated
-SEED_ON_FIRST_RUN=true
-TIMEZONE=UTC                      # e.g. Asia/Kolkata, Europe/London
-DAILY_STATS=true
-STATS_TIME=23:59                  # HH:MM in TIMEZONE
-STATS_CHAT_ID=                    # empty = DM every admin
+### Upgrading from v2
+Stop the bot, copy the new files over the old folder (keep `config.env`, `cookies.txt`, `*.session` and `database/`), then:
 ```
-
-The RSS feed list lives in `config.py`. Check that the URLs still work with `python check_feeds.py`.
+venv/bin/pip install -U -r requirements.txt
+```
+Add the new settings you want from `config.env.example` to your `config.env` (all have sensible defaults). Start the bot. The YouTube channel feeds are seeded on their first check.
 
 ---
 
 ## 🤖 Commands
 
-The "/" menu is hardcoded in `helper/commands.py` and registered with Telegram on every start. Everyone sees `/start`, `/help` and `/ping`. Admins (`OWNER_ID` + `ADMIN_IDS`) also see:
+Everyone: `/start`, `/help`, `/ping`. Admins (`OWNER_ID` + `ADMIN_IDS`, also inside `CONTROL_GROUP_ID`):
 
 | Command | What it does |
 |---|---|
-| `/stats` | Posts today so far. `/stats yesterday` or `/stats week` for other ranges |
-| `/status` | Running or paused, last check, feed health, cookies, all-time count |
-| `/fetchnow` | Check the feeds immediately |
-| `/feeds` | Test every RSS feed right now: which ones work, which are blocked |
-| `/updateytdlp` | Updates yt-dlp, its YouTube solver and the PO-token plugin (nightly builds), then restarts the bot if anything changed. `/updateytdlp stable` skips nightlies |
-| `/ytprobe` | Tries every YouTube setup (JS runtime, player client, with/without cookies) on one video, shows which work, and makes downloads use the first one that does. `/ytprobe [YouTube link]` |
-| `/testtrailer` | Test the trailer pipeline: `/testtrailer` (newest trailer articles), `/testtrailer <article or YouTube link>`, add `send` to also download the video and get it here |
-| `/pause` / `/resume` | Stop / restart posting (nothing is skipped, new articles post after resume) |
-| `/setcookies` | Reply to a `cookies.txt` file to update yt-dlp cookies (private chat) |
+| `/stats` | Posts today. `/stats yesterday`, `/stats week` |
+| `/status` | Running/paused, last check, feed health, which features are on |
+| `/fetchnow` | Check the feeds now |
+| `/feeds` | Test every feed: which work, which are blocked |
+| `/logs` | The log as a .txt file. `/logs trailers` (trailer results and miss reasons), `/logs errors`, `/logs 6h`, combined: `/logs trailers 24h`. Only in a private chat or the control group. |
+| `/netflixtest` | Builds this week's Netflix post and sends it **to you** (not the channel) |
+| `/imdbtest` | Refreshes the IMDb data, shows which shows are followed / matched, sends a rating post preview **to you** |
+| `/testtrailer` | Test the trailer pipeline (`/testtrailer <link>`, add `send` to download) |
+| `/ytprobe` | Find a working yt-dlp setup for YouTube |
+| `/updateytdlp` | Update yt-dlp + solver, restart if anything changed |
+| `/pause` / `/resume` | Stop / restart posting (nothing is skipped) |
+| `/setcookies` | Reply to a `cookies.txt` with this (private chat) |
 
-> **Each admin must open the bot once and press Start**, otherwise Telegram can't give them their personal menu yet. Sending `/start` again refreshes it.
+> Each admin must open the bot once and press **Start** so Telegram can show them the admin menu.
+
+### Reading `/logs trailers`
+Every trailer / teaser / PV post writes one line:
+```
+TRAILER OK   | Overgeared Climax Trailer | from YouTube channel feed
+TRAILER MISS | Some Show Trailer | sent as photo | page www.animenewsnetwork.com blocked (403) | search for 'Some Show': 20 results: 12x name mismatch, 8x too old
+```
+That tells you exactly which step failed: the article page (blocked / no video), the search (and why each result was rejected), or the download.
 
 ---
 
-## 🍪 YouTube Cookies
+## 🌐 Cloudflare WARP for sites that block your server (ANN)
 
-If YouTube blocks downloads (common on servers), send a `cookies.txt` to the bot in a private chat and reply to it with `/setcookies`. Only admins can do this.
+WARP is Cloudflare's free official client. In **proxy mode** it only opens a local port (40000); nothing else on the server changes. **Do the steps in this order.** Connecting before switching to proxy mode sends *all* the server's traffic through WARP and can cut your SSH session.
+
+```
+# Debian / Ubuntu
+curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+sudo apt update && sudo apt install -y cloudflare-warp
+
+warp-cli --accept-tos registration new   # 1. register
+warp-cli --accept-tos mode proxy         # 2. PROXY MODE FIRST (important)
+warp-cli --accept-tos connect            # 3. only now connect
+warp-cli status                          # should say Connected (mode: proxy)
+
+# test: should print HTTP 200 instead of 403
+curl -s -o /dev/null -w "%{http_code}\n" -x socks5h://127.0.0.1:40000 -A "Mozilla/5.0" "https://www.animenewsnetwork.com/news/rss.xml?ann-edition=in"
+```
+If the test shows 200, set `PAGE_PROXY=socks5://127.0.0.1:40000` in `config.env` and restart the bot. If it still shows 403, ANN blocks WARP too; leave `PAGE_PROXY` empty (the YouTube channel feeds still cover most trailers). Remove WARP any time with `sudo apt remove cloudflare-warp`.
+
+---
+
+## 📺 Netflix Top 10
+
+Netflix publishes the Top 10 of every country each **Tuesday** (week Mon–Sun) at top10.netflix.com. The bot checks every 6 hours, keeps the titles that are anime (exact title match on AniList), ranks them by how many countries they charted in, and posts once per week. Most weeks have **2–6 anime**; a week with none is skipped. With `TMDB_API_KEY` set, live-action titles get a "Live-action" label and their own poster. Data files are kept in `database/netflix/` (~35 MB).
+
+## ⭐ IMDb episode ratings
+
+Uses IMDb's free datasets (datasets.imdbws.com, **personal and non-commercial use**; every post carries IMDb's required credit line). Every 3 hours the bot refreshes IMDb's daily files, reads the ratings of the episodes of the `IMDB_TRACK_SHOWS` most popular airing anime, and posts an episode that got its first votes in the last 14 days and has `IMDB_MIN_VOTES`+ votes and `IMDB_MIN_RATING`+ (one per check, `IMDB_MAX_PER_DAY` per day). Shows are matched to IMDb through Wikidata, then by title in IMDb's own title list; `/imdbtest` lists any show it could not match. Files are kept in `database/imdb/` (~300 MB; the big title list is refreshed weekly, the others daily).
+
+Posters come from AniList (460 px, a little soft) or, with a free `TMDB_API_KEY`, from TMDB in full resolution.
 
 ---
 
 ## 🩺 Troubleshooting
 
-**Trailer videos don't download** (`Requested format is not available`): YouTube only returns real video formats if yt-dlp can run its JavaScript challenge solver. Run `/testtrailer send` in the bot. It tells you exactly what's missing. The usual fixes:
+* **A trailer went out without its video:** `/logs trailers` shows the reason. `blocked (403)` → set up `PAGE_PROXY`. `name mismatch` → the headline's show name differs from YouTube's; tell us the show. `download failed` → `/testtrailer send` and `/ytprobe`.
+* **Telegram login `[500 RPC_CALL_FAIL]`:** Telegram-side; the bot retries with growing pauses. Keep the clock right (`timedatectl`), run one copy per token.
+* **YouTube downloads fail (`Requested format is not available`, `n challenge solving failed`):** `/updateytdlp`, then `/ytprobe`. A JavaScript runtime (`deno` from requirements.txt) is required. Cloud IPs may need `cookies.txt` (`/setcookies`) or `YTDLP_PROXY`.
+* **Same story posted twice:** same show + same news type within 48 h is one story; plain news needs 3 shared key words.
+* **A YouTube channel posts too much / the wrong things:** switch it off with `DISABLED_FEEDS=YouTube: Muse Asia`. Only uploads whose title says trailer / teaser / PV (and not clip, episode, preview, short…) are used.
 
-1. A JavaScript runtime: **Deno 2.3+**, **Node 22+** or **Bun** (the bot detects and enables whichever is installed; yt-dlp alone only enables Deno).
-2. The solver package: `pip install -U "yt-dlp[default]"`
-3. On a cloud server or Colab, YouTube often blocks the IP: send a `cookies.txt` and reply `/setcookies`.
-
-**The bot won't start: `[500 RPC_CALL_FAIL] (caused by "auth.ImportBotAuthorization")`:** this is an error on Telegram's side during login (problems with your token or API keys give 400 errors such as `ACCESS_TOKEN_INVALID` instead). The bot now retries the login with growing pauses (15s, 30s, 1 min, up to 2 min, 20 attempts) and clears a half-finished session file between tries, so usually you just wait. If it keeps failing:
-1. Make sure the server clock is right (`timedatectl`; `NTP service: active`).
-2. Run only one copy of the bot with this token.
-3. Copy `anime_news_bot.session` from a machine where the bot already logged in (for example your Colab) into the bot folder on the VPS, and stop the bot on the other machine first. The VPS then reuses that login and skips the failing step.
-
-**YouTube PO token provider (optional extra):** with a working JS runtime (above) it is usually not needed. It is a small local service that supplies YouTube's "proof of trust" token, and helps when YouTube still refuses a server's address. The bot uses it automatically when it finds it, and skips it silently when it doesn't. Three steps on the server:
-```
-# 1. the provider (needs Docker: sudo apt install -y docker.io)
-docker run -d --name bgutil-provider -p 4416:4416 --init --restart unless-stopped brainicism/bgutil-ytdlp-pot-provider
-
-# 2. the yt-dlp plugin (already in requirements.txt; install it in the bot's virtualenv)
-/root/AnimeNewsBot/venv/bin/pip install -U bgutil-ytdlp-pot-provider
-
-# 3. a current yt-dlp (nightly builds carry the newest YouTube fixes)
-/root/AnimeNewsBot/venv/bin/pip install -U --pre "yt-dlp[default,curl-cffi]"
-```
-Then restart the bot and run `/testtrailer`: the "PO token" line must show the plugin ✅ and the provider ✅. If you already run another bot that has a provider, check `docker ps` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4416`: any answer (200 or 404) means it is up and the bot can reuse it. Use `YOUTUBE_POT_URL` in `config.env` if it listens elsewhere.
-
-**Crunchyroll article pages answer 403 from your server:** that only affects the extra page lookup (picture / video link); the Crunchyroll *feed* works and posts keep the feed's image. The bot tries a Chrome-impersonating client (`curl_cffi`) first, and when the site still refuses, remembers that for 6 hours, logs one warning and stops retrying. YouTube trailers for those posts are then found through the other outlets or the YouTube search.
-
-**The YouTube search picked a wrong video:** it now only accepts titles that contain every word of the show name AND look like a trailer / teaser / PV (episode previews, clips, reactions and fan-made videos are rejected), within 3 weeks of the article, and prefers "Official" uploads. `/testtrailer` shows which video it matched so you can check it.
-
-**`n challenge solving failed` / `Only images are available` / `addOnDisposeCallback is not a function`, although Deno works:** the solver script is older than YouTube's current player. YouTube changes its player almost every week, and an old yt-dlp (or `yt-dlp-ejs`) stops getting video formats. That is the number one reason a downloader that worked last month fails today. Fix: `/updateytdlp` (or `pip install -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs` in the virtualenv, then restart). The bot also does this by itself once a day (`YTDLP_AUTO_UPDATE`, on by default) and restarts only when something actually changed. `/testtrailer` warns when yt-dlp is more than 14 days old, and `/ytprobe` also tries the newest solver script straight from GitHub.
-
-**No video, and `/testtrailer` says "JS runtime: ❌ none found" / "No supported JavaScript runtime":** YouTube needs a JavaScript runtime to unlock video formats. The easy, reliable way (the same one the other working bots use) is the `deno` pip package, which ships the Deno binary inside your virtualenv:
-```
-/root/AnimeNewsBot/venv/bin/pip install -U -r requirements.txt     # installs deno, yt-dlp-ejs, yt-dlp, the PO-token plugin...
-```
-Restart the bot. It looks for runtimes next to the Python executable first (so it works even when systemd/pm2 gives the bot a short `PATH`), checks that each one runs and is new enough, and hands yt-dlp the full path. `/testtrailer` shows which runtime was found and where. If yours lives somewhere unusual, set `YTDLP_JS_RUNTIME_PATH=/full/path/to/deno` in `config.env`.
-
-The bot also works on a *copy* of `cookies.txt` for every download, because yt-dlp rewrites the cookie file it is given.
-
-**Videos work on one machine but not on another (for example Colab works, your VPS doesn't):** YouTube treats cloud / datacenter addresses as bots far more often than home or Google-owned ones. The bot copes in three ways:
-1. When a download is blocked, it automatically tries other yt-dlp setups (each JS runtime on its own, other player clients, with and without cookies), remembers the first one that works, and retries. It does this at most once every 30 minutes.
-2. `/ytprobe` runs the same search on demand and shows the result for every setup.
-3. If nothing works, the server's address itself is blocked. Set `YTDLP_PROXY` in `config.env` to a proxy (it is used for YouTube only), or run the bot from another network.
-
-**Videos still don't download:** run `/ytprobe`, then `/testtrailer send`. It now shows:
-- whether `cookies.txt` really contains a valid Google login (a file exported while logged out, or an expired one, is the most common reason),
-- which JavaScript runtime was found, with its version (yt-dlp needs Deno 2.3+ or Node 22+) and whether the EJS solver is installed,
-- the actual warnings yt-dlp printed ("yt-dlp said: ...") and a hint for the likely fix.
-
-Python 3.11 or newer is recommended: yt-dlp has deprecated 3.10.
-
-**Anime News Network keeps answering 403 from your server:** tested with a Chrome-impersonating client (`curl_cffi`) as well as plain `curl` and the bot: all get 403, so ANN is blocking your server's address, not the bot's connection style. Options: set up a proxy for it, run the bot from a home or other network, or switch the feed off with `DISABLED_FEEDS=Anime News Network`.
-
-**Anime News Network:** its feed blocks many cloud / Colab IPs (HTTP 403). It works from a normal VPS or home connection. Use the edition you want by changing `ann-edition=in` to `us` in `config.py`. Run `/feeds` to check.
-
-**A feed shows a 403 / is blocked:** run `/feeds`. A feed that is blocked everywhere is only retried once an hour. If your server's IP is simply refused, switch the feed off with `DISABLED_FEEDS=Anime News Network` in `config.env`.
-
-**`/feeds` says "returns a web page, not an RSS feed":** that URL isn't a feed. Replace it in `config.py`. Each feed can be a list of alternative URLs in `config.py`, and the bot tries several browser-like request profiles and remembers the one that works. If every attempt is blocked, the site is rejecting your server's IP, and you can remove that feed or run the bot from a different network.
-
-**Same story posted twice:** the bot treats the same show + news type within 48 hours as one story (a trailer, teaser and PV of one show count as the same). Two stories of different types about one show (say a trailer and a cast reveal) are still posted separately, and plain news is only merged when the headlines share at least 3 key words.
-
----
-
-## 📝 Notes
-
-* **Video lookup order for trailer articles:** the feed item, then the article page, then a strict YouTube search (`YT_SEARCH_FALLBACK`). The search only accepts a video whose title has every word of the show name, matches the season, isn't a reaction/review, fits the length limit and was uploaded in the last 3 weeks. `/testtrailer` shows what it matched, so you can check it. If nothing passes, the post goes out without a video.
-* If a video can't be downloaded (too big, too long, blocked), the post is sent with the image instead.
-* Telegram limits captions to 1024 characters, so very long articles are trimmed at a sentence boundary.
-* Date, platform and studio detection is rule-based and best effort. If a detail isn't in the article text, it is left out.
+## 🧰 Stack
+Python 3.11+, Pyrofork, feedparser, httpx, BeautifulSoup, yt-dlp (+ffmpeg, deno), Pillow, SQLite, deep-translator. Data: AniList, IMDb datasets, Netflix Top 10, Wikidata, optional TMDB. Fonts: Inter and Bebas Neue (SIL Open Font License, in `assets/fonts`).

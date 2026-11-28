@@ -1,13 +1,14 @@
 pyrofork>=2.3.60
 tgcrypto
 feedparser
-httpx
+httpx[socks]                  # [socks] = PAGE_PROXY can be a socks5 proxy such as Cloudflare WARP
 beautifulsoup4
 deep-translator
 python-dotenv
 tzdata
+pillow                        # draws the IMDb rating cards and the Netflix chart, reads picture sizes
 
-# --- YouTube trailer downloads (same stack as the working Nami-San / tg-ytdlp bots) ---
+# --- YouTube trailer downloads ---
 yt-dlp[default,curl-cffi]     # [default] pulls the solver script, [curl-cffi] = browser impersonation
 yt-dlp-ejs                    # YouTube challenge-solver script (required for YouTube)
 deno                          # JavaScript runtime for the solver: the pip package ships the binary

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -33,6 +34,13 @@ class Database:
                 posted_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_articles_title ON articles(title_norm, posted_at);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, ts INTEGER);
+            CREATE TABLE IF NOT EXISTS imdb_episodes (
+                ep_id TEXT PRIMARY KEY, parent TEXT, season INTEGER, episode INTEGER,
+                first_rated INTEGER, rating REAL, votes INTEGER, posted_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_imdb_parent ON imdb_episodes(parent);
             """
         )
         # add the statistics columns to databases created by earlier versions
@@ -63,6 +71,34 @@ class Database:
                 [(link, norm_title(title)) for link, title in rows],
             )
         self.conn.commit()
+
+    # ------------------------------------------------------------------ small key/value stores
+    def get_meta(self, key, default=None):
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def set_meta(self, key, value):
+        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+        self.conn.commit()
+
+    def cache_get(self, key, max_age=None):
+        row = self.conn.execute("SELECT value, ts FROM cache WHERE key = ?", (key,)).fetchone()
+        if not row or (max_age is not None and time.time() - row[1] > max_age):
+            return None
+        return json.loads(row[0])
+
+    def cache_set(self, key, value):
+        self.conn.execute("INSERT OR REPLACE INTO cache (key, value, ts) VALUES (?, ?, ?)",
+                          (key, json.dumps(value), int(time.time())))
+        self.conn.commit()
+
+    def sources_seen(self) -> set:
+        """Feeds that already have rows in the database (seeded or posted before)."""
+        return {r[0] for r in self.conn.execute("SELECT DISTINCT source FROM articles WHERE source IS NOT NULL")}
+
+    def posted_today(self, kind: str, start_ts: int) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM articles WHERE kind = ? AND status = 'posted' AND posted_at >= ?",
+                                 (kind, start_ts)).fetchone()[0]
 
     # ------------------------------------------------------------------ dedup
     def is_empty(self) -> bool:
@@ -135,6 +171,8 @@ class Database:
             "duplicates": duplicates,
             "posted": len(rows),
             "media": len(media),
+            "ratings": sum(1 for r in rows if r[0] == "rating"),
+            "netflix": sum(1 for r in rows if r[0] == "netflix"),
             "with_video": sum(1 for r in media if r[2]),
             "by_source": Counter(r[1] or "Unknown" for r in rows).most_common(),
             "skipped": skipped,

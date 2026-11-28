@@ -1,3 +1,5 @@
+import time
+
 from deep_translator import GoogleTranslator
 
 
@@ -14,8 +16,10 @@ def translate_if_needed(text: str, target_lang: str = "en") -> str:
     """Blocking - call it through asyncio.to_thread()."""
     if not text or not _needs_translation(text):
         return text or ""
-    try:
-        out = GoogleTranslator(source="auto", target=target_lang).translate(text[:4500])
-        return out or text
-    except Exception:
-        return text
+    for attempt in range(3):
+        try:
+            out = GoogleTranslator(source="auto", target=target_lang).translate(text[:4500])
+            return out or text
+        except Exception:
+            time.sleep(2 * (attempt + 1))  # Google's free endpoint rate-limits bursts: wait a moment, try again
+    return text

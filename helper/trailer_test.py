@@ -13,9 +13,18 @@ from helper.downloader import (
     runtime_warnings,
     search_trailer,
 )
+from helper import anilist
 from helper.fetcher import fetch_new_articles
 from helper.pagevideo import fetch_page_info
 from helper.parser import KIND_NAME, clean_text, enrich, extract_youtube_url
+
+
+def clip_html(text: str, limit: int = 3900) -> str:
+    """Cut a long HTML report at a line break, so no tag is cut in half (Telegram would reject the message)."""
+    if len(text) <= limit:
+        return text
+    out = text[:limit].rsplit("\n", 1)[0]
+    return out + "\n…"
 
 
 def _esc(s) -> str:
@@ -73,7 +82,7 @@ async def _targets(http, arg):
     out = []
     for a in reversed(await fetch_new_articles(http, None, limit=10)):  # newest first
         e = enrich(a, clean_text(a["title"]), clean_text(a["body_html"]))
-        if not e["is_media"]:
+        if not (e["is_media"] or e.get("video_hint")):
             continue
         yt, how, image = e["youtube_url"], ("feed" if e["youtube_url"] else None), e.get("image_url")
         if not yt or not image:
@@ -83,12 +92,16 @@ async def _targets(http, arg):
             image = image or info["image"]
         matched = None
         name = e.get("show") or e.get("search_name")
+        why = None
         if not yt and YT_SEARCH_FALLBACK and name:
-            m = await search_trailer(name, KIND_NAME[e["kind"]], e["title_en"], e.get("published"))
+            media = await anilist.find_show(http, name)
+            kind = e["kind"] if e["kind"] in KIND_NAME else e.get("video_hint") or "trailer"
+            m, why = await search_trailer(name, KIND_NAME.get(kind, "Trailer"), e["title_en"], e.get("published"),
+                                          anilist.names(media) if media else [])
             if m:
                 yt, how, matched = m["url"], "YouTube search", f"{m['title']} ({m.get('channel') or '?'})"
-        out.append({"label": e["title_en"][:80], "yt": yt, "how": how, "image": image, "kind": e["kind"],
-                    "matched": matched})
+        out.append({"label": e["title_en"][:80], "yt": yt, "how": how, "image": image,
+                    "kind": e["kind"] or e.get("video_hint"), "matched": matched, "why": why})
         if len(out) >= 3:
             break
     note = None if out else "No trailer/teaser/PV articles in the feeds right now. Try /testtrailer &lt;article link or YouTube link&gt;."
@@ -114,6 +127,8 @@ async def run_trailer_test(http, arg=None, send=False):
             lines.append(f"   {_esc(t['yt'])}")
         if t.get("matched"):
             lines.append(f"   🔍 matched by search: “{_esc(t['matched'])}”. Check it's the right video.")
+        elif t.get("why"):
+            lines.append(f"   🔍 search: {_esc(t['why'])}")
 
     video = None
     first = next((t for t in targets if t["yt"]), None)
@@ -155,7 +170,7 @@ async def run_trailer_test(http, arg=None, send=False):
     elif targets:
         lines += ["", "No video link found for these, so there's nothing to download. The post would go out with the image."]
 
-    return "\n".join(lines)[:4000], video
+    return clip_html("\n".join(lines)), video
 
 
 async def run_probe_report(url: str) -> str:
@@ -198,4 +213,4 @@ async def run_probe_report(url: str) -> str:
             tips.append("send fresh cookies exported while logged in (/setcookies)")
         tips.append("YouTube probably blocks this server's address: set YTDLP_PROXY in config.env, or run the bot from another network")
         lines.append("❌ Nothing worked. Try: " + "; ".join(tips) + ".")
-    return "\n".join(lines)[:4000]
+    return clip_html("\n".join(lines))

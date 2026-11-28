@@ -1,6 +1,7 @@
 """Keeping yt-dlp fresh. YouTube changes its player almost every week; an old yt-dlp / solver script then stops
 getting video formats ("n challenge solving failed", "Only images are available")."""
 import asyncio
+import html
 import importlib.metadata as md
 import logging
 import os
@@ -30,19 +31,29 @@ async def run_update(pre: bool = None, timeout: int = 600, python: str = None) -
     """pip install -U yt-dlp & friends into the bot's own virtualenv. -> {ok, before, after, changed, log}"""
     pre = YTDLP_UPDATE_PRE if pre is None else pre
     before = versions()
-    cmd = [python or sys.executable, "-m", "pip", "install", "-U", "--disable-pip-version-check"]
-    cmd += (["--pre"] if pre else []) + PACKAGES
-    try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return {"ok": False, "before": before, "after": versions(), "changed": False, "log": "pip timed out"}
-    except Exception as e:
-        return {"ok": False, "before": before, "after": before, "changed": False, "log": f"could not run pip: {e}"}
+    base = [python or sys.executable, "-m", "pip", "install", "-U", "--disable-pip-version-check"]
+    # Nightly builds only for yt-dlp itself: `--pre` on the whole list would also pull pre-releases of every dependency.
+    steps = [base + PACKAGES]
+    if pre:
+        steps.append(base + ["--pre", "--no-deps", "yt-dlp"])
+    texts, ok = [], True
+    for cmd in steps:
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()
+            return {"ok": False, "before": before, "after": versions(), "changed": False, "log": "pip timed out"}
+        except Exception as e:
+            return {"ok": False, "before": before, "after": before, "changed": False, "log": f"could not run pip: {e}"}
+        texts.append(out.decode(errors="replace").strip())
+        ok = ok and proc.returncode == 0
     after = versions()
-    text = out.decode(errors="replace").strip()
-    return {"ok": proc.returncode == 0, "before": before, "after": after, "changed": before != after,
+    text = "\n".join(texts)
+    return {"ok": ok, "before": before, "after": after, "changed": before != after,
             "log": "\n".join(text.splitlines()[-6:])}
 
 
@@ -55,7 +66,7 @@ def report(res: dict) -> str:
         elif old:
             lines.append(f"• {name}: {old} (already the newest)")
     if not res["ok"]:
-        lines.append(f"<pre>{res['log'][-500:]}</pre>")
+        lines.append(f"<pre>{html.escape(res['log'][-500:], quote=False)}</pre>")
     return "\n".join(lines)
 
 

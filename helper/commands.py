@@ -3,7 +3,7 @@ import logging
 
 from pyrogram.types import BotCommand, BotCommandScopeChat
 
-from config import ADMIN_IDS
+from config import ADMIN_IDS, CONTROL_GROUP_ID
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +21,9 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
     BotCommand("updateytdlp", "Update yt-dlp + YouTube solver, then restart (YouTube changes weekly)"),
     BotCommand("ytprobe", "Find a working YouTube download setup: /ytprobe [link]"),
     BotCommand("testtrailer", "Test trailer lookup: /testtrailer [link] [send]"),
+    BotCommand("logs", "Log file: /logs [trailers|errors] [6h]"),
+    BotCommand("netflixtest", "Preview this week's Netflix Top 10 anime post here"),
+    BotCommand("imdbtest", "Check IMDb ratings and preview a rating post here"),
     BotCommand("pause", "Pause posting"),
     BotCommand("resume", "Resume posting"),
     BotCommand("setcookies", "Reply to a cookies.txt file to update yt-dlp cookies"),
@@ -46,3 +49,5 @@ async def register_commands(app):
     await app.set_bot_commands(PUBLIC_COMMANDS)  # default scope: everybody
     for admin_id in ADMIN_IDS:
         await set_admin_menu(app, admin_id)
+    if CONTROL_GROUP_ID:
+        await set_admin_menu(app, CONTROL_GROUP_ID)
