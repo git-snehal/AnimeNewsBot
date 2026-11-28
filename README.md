@@ -1,5 +1,5 @@
 <div align="center">
-Anime News Bot
+  #  Automated Anime News Bot
 <img src="https://github.com/git-snehal/git-snehal/blob/main/assets/News.gif" width="100%" alt="Anime News Bot Demo" />
 
 ### *A Telegram bot that collects anime news, posts each story once, attaches the official trailer, and adds weekly Netflix charts and IMDb episode ratings with images it draws itself.*
